@@ -1,0 +1,89 @@
+{% extends "base.html" %}
+{% block title %}Option Chain · Delta Trading{% endblock %}
+{% block nav_option %}active{% endblock %}
+
+{% block content %}
+<div class="page">
+  <!-- SECTION 1 — Controls -->
+  <section class="oc-controls">
+    <div class="ctl-group">
+      <span class="ctl-label">Asset</span>
+      <div class="asset-toggle" id="asset-toggle">
+        <button class="asset-btn active" data-asset="BTC">BTC</button>
+        <button class="asset-btn" data-asset="ETH">ETH</button>
+        <button class="asset-btn" data-asset="SOL">SOL</button>
+      </div>
+    </div>
+    <div class="ctl-group">
+      <span class="ctl-label">Expiry</span>
+      <select id="expiry-select" class="ctl-input"></select>
+    </div>
+    <div class="ctl-group">
+      <span class="ctl-label">Strikes</span>
+      <input id="strikes-input" class="ctl-input ctl-num" type="number" min="4" max="80" step="2" value="20" />
+    </div>
+    <div class="ctl-group">
+      <span class="ctl-label">Auto-refresh</span>
+      <label class="switch">
+        <input type="checkbox" id="autorefresh-toggle" />
+        <span class="slider"></span>
+      </label>
+      <select id="interval-select" class="ctl-input">
+        <option value="5">5s</option>
+        <option value="10" selected>10s</option>
+        <option value="30">30s</option>
+      </select>
+    </div>
+    <button id="refresh-btn" class="btn-primary">Refresh Now</button>
+    <span class="oc-status" id="oc-status"></span>
+  </section>
+
+  <!-- SECTION 2 — Summary stats -->
+  <section class="oc-summary" id="oc-summary">
+    <div class="sum-card"><span class="sum-label">Spot Price</span><span class="sum-value big" data-sum="spot">—</span></div>
+    <div class="sum-card"><span class="sum-label">ATM Strike</span><span class="sum-value" data-sum="atm">—</span></div>
+    <div class="sum-card"><span class="sum-label">PCR (OI)</span><span class="sum-value" data-sum="pcr_oi">—</span></div>
+    <div class="sum-card"><span class="sum-label">PCR (Vol)</span><span class="sum-value" data-sum="pcr_vol">—</span></div>
+    <div class="sum-card"><span class="sum-label">Total Call OI</span><span class="sum-value" data-sum="call_oi">—</span></div>
+    <div class="sum-card"><span class="sum-label">Total Put OI</span><span class="sum-value" data-sum="put_oi">—</span></div>
+    <div class="sum-card"><span class="sum-label">Max Pain</span><span class="sum-value" data-sum="max_pain">—</span></div>
+    <div class="sum-card"><span class="sum-label">ATM IV</span><span class="sum-value" data-sum="atm_iv">—</span></div>
+  </section>
+
+  <!-- SECTION 3 — Option chain table -->
+  <section class="oc-table-wrap">
+    <table class="oc-table">
+      <thead>
+        <tr class="grp-row">
+          <th colspan="8" class="grp-calls">CALLS</th>
+          <th rowspan="2" class="grp-strike">STRIKE</th>
+          <th colspan="8" class="grp-puts">PUTS</th>
+        </tr>
+        <tr class="col-row">
+          <th>OI</th><th>Vol</th><th>IV%</th><th>&Delta;</th><th>&theta;</th><th>Bid</th><th>Ask</th><th>LTP</th>
+          <th>LTP</th><th>Bid</th><th>Ask</th><th>IV%</th><th>&Delta;</th><th>&theta;</th><th>Vol</th><th>OI</th>
+        </tr>
+      </thead>
+      <tbody id="oc-tbody">
+        <tr><td colspan="17" class="oc-empty">Loading option chain…</td></tr>
+      </tbody>
+    </table>
+  </section>
+
+  <!-- SECTION 4 — OI + IV smile charts -->
+  <section class="oc-charts">
+    <div class="oc-chart-card">
+      <h3 class="side-title">Open Interest by Strike <span class="dim" id="oi-pcr-label"></span></h3>
+      <canvas id="oi-chart" height="300"></canvas>
+    </div>
+    <div class="oc-chart-card">
+      <h3 class="side-title">IV Smile</h3>
+      <canvas id="iv-smile-chart" height="300"></canvas>
+    </div>
+  </section>
+</div>
+{% endblock %}
+
+{% block extra_js %}
+<script src="/static/js/option_chain.js"></script>
+{% endblock %}

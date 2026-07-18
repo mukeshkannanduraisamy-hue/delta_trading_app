@@ -1,0 +1,50 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="color-scheme" content="dark" />
+  <title>{% block title %}Delta Trading{% endblock %}</title>
+
+  <!-- Google Fonts: Inter -->
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link
+    href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap"
+    rel="stylesheet"
+  />
+
+  <!-- TradingView Lightweight Charts (vendored locally, v4.2.3) -->
+  <script src="/static/js/lib/lightweight-charts.standalone.production.js"></script>
+
+  <link rel="stylesheet" href="/static/css/style.css" />
+</head>
+<body>
+  <!-- Top navigation -->
+  <nav class="navbar">
+    <div class="nav-left">
+      <a class="logo" href="/">DELTA<span>TRADING</span></a>
+      <ul class="nav-links">
+        <li><a href="/" class="{% block nav_dashboard %}{% endblock %}">Dashboard</a></li>
+        <li><a href="/option-chain" class="{% block nav_option %}{% endblock %}">Option Chain</a></li>
+        <li><a href="/strategy" class="{% block nav_strategy %}{% endblock %}">Strategy</a></li>
+        <li><a href="/journal" class="{% block nav_journal %}{% endblock %}">Journal</a></li>
+        <li><a href="/performance" class="{% block nav_performance %}{% endblock %}">Performance</a></li>
+      </ul>
+    </div>
+    <div class="nav-right">
+      <span class="conn-indicator" id="conn-indicator" title="Connection status">
+        <span class="conn-dot" id="conn-dot"></span>
+        <span class="conn-label" id="conn-label">Connecting…</span>
+      </span>
+    </div>
+  </nav>
+
+  <main class="content">
+    {% block content %}{% endblock %}
+  </main>
+
+  <script src="/static/js/app.js"></script>
+  {% block extra_js %}{% endblock %}
+</body>
+</html>

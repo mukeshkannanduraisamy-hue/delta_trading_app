@@ -1,0 +1,137 @@
+{% extends "base.html" %}
+{% block title %}Dashboard · Delta Trading{% endblock %}
+{% block nav_dashboard %}active{% endblock %}
+
+{% block content %}
+<!-- SECTION 2 — Connection status bar -->
+<div class="status-bar disconnected" id="status-bar">
+  <span class="status-item">WebSocket:
+    <strong id="status-ws">CONNECTING…</strong>
+  </span>
+  <span class="status-sep">|</span>
+  <span class="status-item">Last Update:
+    <strong id="status-last">—</strong>
+  </span>
+  <span class="status-sep">|</span>
+  <span class="status-item">Updates Received:
+    <strong id="status-count">0</strong>
+  </span>
+  <span class="status-sep">|</span>
+  <span class="status-item">Latency:
+    <strong id="status-latency">— ms</strong>
+  </span>
+</div>
+
+<div class="page">
+  <!-- SECTION 1 — Live ticker cards -->
+  <section class="ticker-grid">
+    {% for symbol in symbols %}
+    <article class="ticker-card flat" id="card-{{ symbol }}" data-symbol="{{ symbol }}">
+      <header class="card-head">
+        <div class="card-title">
+          <span class="asset">{{ symbol[:3] }}</span>
+          <span class="pair">{{ symbol }}</span>
+        </div>
+        <span class="card-arrow" data-field="arrow">—</span>
+      </header>
+
+      <div class="spot" data-field="spot_price">—</div>
+
+      <div class="sub-row">
+        <span class="mark">Mark <strong data-field="mark_price">—</strong></span>
+        <span class="change" data-field="change_24h">—</span>
+      </div>
+
+      <div class="metrics">
+        <div class="metric">
+          <span class="m-label">24h High</span>
+          <span class="m-value" data-field="high">—</span>
+        </div>
+        <div class="metric">
+          <span class="m-label">24h Low</span>
+          <span class="m-value" data-field="low">—</span>
+        </div>
+        <div class="metric bid">
+          <span class="m-label">Bid</span>
+          <span class="m-value" data-field="best_bid">—</span>
+        </div>
+        <div class="metric ask">
+          <span class="m-label">Ask</span>
+          <span class="m-value" data-field="best_ask">—</span>
+        </div>
+        <div class="metric">
+          <span class="m-label">Volume</span>
+          <span class="m-value" data-field="volume">—</span>
+        </div>
+        <div class="metric">
+          <span class="m-label">Open Interest</span>
+          <span class="m-value" data-field="oi">—</span>
+        </div>
+      </div>
+
+      <footer class="card-foot">
+        <span class="dim">Updated</span>
+        <span class="updated" data-field="updated">—</span>
+      </footer>
+    </article>
+    {% endfor %}
+  </section>
+
+  <!-- SECTION 3 — Chart + market stats + recent trades -->
+  <section class="chart-section">
+    <div class="chart-main">
+      <div class="chart-toolbar">
+        <div class="chart-title">
+          BTCUSD <span class="dim">| Live Candlestick Chart ·</span>
+          <span class="chart-res" id="chart-title-res">5M</span>
+        </div>
+        <div class="tf-group">
+          <button class="tf-btn" data-res="1m">1m</button>
+          <button class="tf-btn" data-res="3m">3m</button>
+          <button class="tf-btn" data-res="5m">5m</button>
+          <button class="tf-btn" data-res="15m">15m</button>
+          <button class="tf-btn" data-res="30m">30m</button>
+          <button class="tf-btn" data-res="1h">1h</button>
+          <button class="tf-btn" data-res="4h">4h</button>
+          <button class="tf-btn" data-res="1d">1d</button>
+        </div>
+      </div>
+      <div class="chart-wrap">
+        <div id="chart-container" class="chart-container"></div>
+        <div id="chart-loading" class="chart-loading"><span class="spinner"></span></div>
+      </div>
+    </div>
+
+    <aside class="chart-side">
+      <div class="side-card">
+        <h3 class="side-title">Market Stats <span class="dim">BTCUSD</span></h3>
+        <div class="stat-rows" id="market-stats">
+          <div class="stat-row"><span class="s-label">Open (24h)</span><span class="s-value" data-field="open">—</span></div>
+          <div class="stat-row"><span class="s-label">High (24h)</span><span class="s-value" data-field="high">—</span></div>
+          <div class="stat-row"><span class="s-label">Low (24h)</span><span class="s-value" data-field="low">—</span></div>
+          <div class="stat-row"><span class="s-label">Close</span><span class="s-value" data-field="close">—</span></div>
+          <div class="stat-row"><span class="s-label">Volume</span><span class="s-value" data-field="volume">—</span></div>
+          <div class="stat-row"><span class="s-label">Turnover USD</span><span class="s-value" data-field="turnover_usd">—</span></div>
+          <div class="stat-row"><span class="s-label">OI Contracts</span><span class="s-value" data-field="oi">—</span></div>
+          <div class="stat-row"><span class="s-label">OI Value USD</span><span class="s-value" data-field="oi_value_usd">—</span></div>
+          <div class="stat-row"><span class="s-label">Band Low</span><span class="s-value" data-field="band_low">—</span></div>
+          <div class="stat-row"><span class="s-label">Band High</span><span class="s-value" data-field="band_high">—</span></div>
+          <div class="stat-row"><span class="s-label">Funding Rate</span><span class="s-value" data-field="funding">—</span></div>
+        </div>
+      </div>
+
+      <div class="side-card">
+        <h3 class="side-title">Recent Trades <span class="dim">BTCUSD</span></h3>
+        <div class="trades-head">
+          <span>Price</span><span>Size</span><span>Time</span>
+        </div>
+        <div class="trades-list" id="trades-list"></div>
+      </div>
+    </aside>
+  </section>
+</div>
+{% endblock %}
+
+{% block extra_js %}
+<script src="/static/js/chart.js"></script>
+{% endblock %}
