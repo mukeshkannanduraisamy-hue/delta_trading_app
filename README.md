@@ -132,7 +132,7 @@ longer exists; the index carries a correction.
 
 ## License
 
-No license granted. All rights reserved.
+MIT — see [`LICENSE`](LICENSE).
 
 ## Disclaimer
 
