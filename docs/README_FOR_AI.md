@@ -311,7 +311,7 @@ Check main.py stdout for logs
 
 ## 📞 Support / Handoff Info
 
-- **Developer:** mukeshkannanduraisamy@gmail.com
+- **Contact:** via the repository's issue tracker
 - **Status:** All features complete; no validated edge
 - **Testnet only:** Do not deploy capital
 - **Paper is default:** Safe for experimentation

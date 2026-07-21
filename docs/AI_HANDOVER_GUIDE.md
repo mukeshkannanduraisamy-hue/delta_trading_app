@@ -284,7 +284,7 @@ STRATEGIES = {
 
 ## Contact / Handoff Notes
 
-- **Developer email:** mukeshkannanduraisamy@gmail.com
+- **Contact:** via the repository's issue tracker
 - **Delta API docs:** https://api.india.delta.exchange (public endpoints only)
 - **Zing strategies reference:** https://zing.trade/blog/category/strategies/
 - **Project verdict:** No validated edge. All strategies tested negative. Use for ops/research testing only. Do not deploy capital.
