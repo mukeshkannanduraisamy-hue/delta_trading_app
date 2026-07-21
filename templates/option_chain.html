@@ -25,7 +25,7 @@
     <div class="ctl-group">
       <span class="ctl-label">Auto-refresh</span>
       <label class="switch">
-        <input type="checkbox" id="autorefresh-toggle" />
+        <input type="checkbox" id="autorefresh-toggle" checked />
         <span class="slider"></span>
       </label>
       <select id="interval-select" class="ctl-input">
@@ -74,11 +74,11 @@
   <section class="oc-charts">
     <div class="oc-chart-card">
       <h3 class="side-title">Open Interest by Strike <span class="dim" id="oi-pcr-label"></span></h3>
-      <canvas id="oi-chart" height="300"></canvas>
+      <canvas id="oi-chart" data-h="300"></canvas>
     </div>
     <div class="oc-chart-card">
       <h3 class="side-title">IV Smile</h3>
-      <canvas id="iv-smile-chart" height="300"></canvas>
+      <canvas id="iv-smile-chart" data-h="300"></canvas>
     </div>
   </section>
 </div>

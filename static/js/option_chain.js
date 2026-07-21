@@ -11,7 +11,9 @@
     asset: "BTC",
     expiry: "",
     strikes: 20,
-    autoRefresh: false,
+    // Streaming is push-based and costs no REST calls, so live updates are ON
+    // by default; the toggle now means "pause live updates", not "start polling".
+    autoRefresh: true,
     interval: 10,
     timer: null,
     data: null,
@@ -229,10 +231,12 @@
   function setupCanvas(canvas) {
     var dpr = window.devicePixelRatio || 1;
     var cssW = canvas.clientWidth || canvas.parentNode.clientWidth || 600;
-    var cssH = canvas.getAttribute("height") ? parseInt(canvas.getAttribute("height"), 10) : 300;
+    // Read from data-h (never overwritten by canvas.height); fall back to 300.
+    var cssH = parseInt(canvas.dataset.h || "300", 10);
+    canvas.style.width = cssW + "px";
+    canvas.style.height = cssH + "px";
     canvas.width = cssW * dpr;
     canvas.height = cssH * dpr;
-    canvas.style.height = cssH + "px";
     var ctx = canvas.getContext("2d");
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     ctx.clearRect(0, 0, cssW, cssH);
@@ -408,13 +412,33 @@
     });
   }
 
-  // ---- Auto-refresh ------------------------------------------------------
-  function startAutoRefresh() {
-    stopAutoRefresh();
-    if (state.autoRefresh) {
-      state.timer = setInterval(function () { fetchOptionChain(false); }, state.interval * 1000);
+  // ---- Live streaming (WebSocket push, replaces REST polling) ------------
+  // The server holds the chain structure and overlays live quotes from the
+  // in-memory price bus, pushing ~2x/sec. No interval, no refresh.
+  var streamBound = false;
+
+  function subscribeStream() {
+    if (!state.expiry || !window.AppWS) return;
+    AppWS.send({ action: "sub_chain", asset: state.asset, expiry: state.expiry });
+    if (!streamBound) {
+      streamBound = true;
+      AppWS.on("chain", function (data) {
+        if (!state.autoRefresh) return;                 // user paused updates
+        if (!data || data.error) return;
+        if (data.asset !== state.asset) return;         // ignore other selections
+        if (state.expiry && data.expiry && data.expiry !== state.expiry) return;
+        state.loading = false;
+        state.data = data;
+        renderAll(data, false);
+        setStatus("Live · " + (data.live_contracts || 0) + " contracts streaming");
+      });
+      AppWS.onStatus(function (s) {
+        if (s !== "connected") setStatus("Live feed " + s + "…");
+      });
     }
   }
+
+  function startAutoRefresh() { subscribeStream(); }
   function stopAutoRefresh() {
     if (state.timer) { clearInterval(state.timer); state.timer = null; }
   }
@@ -427,11 +451,11 @@
         document.querySelectorAll(".asset-btn").forEach(function (x) { x.classList.remove("active"); });
         b.classList.add("active");
         state.asset = b.getAttribute("data-asset");
-        loadExpiries(state.asset, function () { fetchOptionChain(true); });
+        loadExpiries(state.asset, function () { fetchOptionChain(true); subscribeStream(); });
       });
     });
     $("expiry-select").addEventListener("change", function (e) {
-      state.expiry = e.target.value; fetchOptionChain(true);
+      state.expiry = e.target.value; fetchOptionChain(true); subscribeStream();
     });
     $("strikes-input").addEventListener("change", function (e) {
       var v = parseInt(e.target.value, 10);
@@ -444,10 +468,10 @@
     $("interval-select").addEventListener("change", function (e) {
       state.interval = parseInt(e.target.value, 10) || 10; startAutoRefresh();
     });
-    $("refresh-btn").addEventListener("click", function () { fetchOptionChain(true); });
+    $("refresh-btn").addEventListener("click", function () { fetchOptionChain(true); subscribeStream(); });
     window.addEventListener("resize", function () { if (state.data) { renderOIChart(state.data); renderIVSmile(state.data); } });
 
-    loadExpiries(state.asset, function () { fetchOptionChain(true); });
+    loadExpiries(state.asset, function () { fetchOptionChain(true); subscribeStream(); });
   }
 
   if (document.readyState === "loading") {

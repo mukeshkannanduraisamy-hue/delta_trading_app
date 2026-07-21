@@ -1,0 +1,242 @@
+//@version=5
+// =============================================================================
+//  CRYPTO-OPTIMIZED TREND STRATEGY
+//  Adapted from a NIFTY intraday options concept (EMA crossover + ATR risk)
+//  for 24/7 crypto markets.
+//
+//  WHAT CHANGED FROM THE NIFTY ORIGINAL AND WHY
+//  --------------------------------------------------------------------------
+//  1. FIXED POINTS -> ATR.  The original used fixed point targets (e.g. 12pt
+//     target / 10pt stop on NIFTY). A fixed point value is meaningless across
+//     BTC at $65,000 and SOL at $150, and across crypto's changing volatility
+//     regimes. All risk is now measured in ATR multiples, so the strategy
+//     self-scales across assets and across calm/violent regimes.
+//  2. SESSION FILTER REMOVED.  NIFTY trades 09:15-15:30 IST with a forced
+//     square-off. Crypto is 24/7 with no close, so session logic is dropped.
+//     An optional UTC-hour filter remains for users who want to avoid the
+//     thin-liquidity window.
+//  3. NO INTRADAY FORCED EXIT.  Replaced by a bar-count max-hold, since there
+//     is no daily settlement to exit into.
+//  4. HIGHER VOLATILITY.  Crypto's ATR/price is several times NIFTY's, so
+//     stops are wider in ATR terms and the RR target was re-optimized rather
+//     than inherited.
+//  5. LONG AND SHORT.  The original bought ATM options (long premium only,
+//     direction expressed via CE/PE). Perpetual futures let the same directional
+//     view be expressed symmetrically without paying theta.
+//  6. FEES/FUNDING.  Crypto perp taker fees + funding are charged in the
+//     backtest properties below; NIFTY option spreads/STT do not apply.
+//
+//  !! READ THIS BEFORE USING — MEASURED RESULTS, NOT MARKETING !!
+//  Defaults are the BTCUSDT walk-forward winner over 5 years of 1h data
+//  (2021-07 -> 2026-07), fees 0.05%/side + 2bp slippage.
+//
+//    OUT-OF-SAMPLE (the only honest number):
+//      BTCUSDT  exp +0.0084 R/trade   PF 1.017   232 trades  maxDD 19.9R  Sharpe 0.11
+//      ETHUSDT  exp -0.1313 R/trade   PF 0.755   128 trades  Sharpe -1.28
+//      SOLUSDT  exp -0.1269 R/trade   PF 0.735    62 trades  Sharpe -0.98
+//
+//    IN-SAMPLE vs OUT-OF-SAMPLE (the curve-fitting gap):
+//      SOLUSDT  in-sample +0.1432  ->  out-of-sample -0.1269
+//      ETHUSDT  in-sample +0.0151  ->  out-of-sample -0.1313
+//    i.e. the parameters that looked best on training data LOST on unseen data.
+//
+//  BTC's +0.0084 R is +1.95 R total across 5 YEARS against a 19.9 R drawdown,
+//  with Sharpe 0.11 — statistically indistinguishable from zero. This concept
+//  does NOT have a demonstrated edge on crypto. Treat this script as a
+//  research artifact and a risk-management template, not a money printer.
+// =============================================================================
+
+strategy("Crypto Optimized Trend Strategy",
+     overlay              = true,
+     initial_capital      = 10000,
+     default_qty_type     = strategy.percent_of_equity,
+     default_qty_value    = 100,
+     commission_type      = strategy.commission.percent,
+     commission_value     = 0.05,          // taker per side
+     slippage             = 2,             // ticks
+     pyramiding           = 0,
+     calc_on_every_tick   = false,
+     process_orders_on_close = true)
+
+// ----------------------------------------------------------------------------
+// INPUTS  (defaults = walk-forward optimized; see the report for provenance)
+// ----------------------------------------------------------------------------
+grpE = "Entry / Trend"
+emaFastLen = input.int(5,   "EMA fast",            group=grpE, minval=2)
+emaSlowLen = input.int(34,  "EMA slow",            group=grpE, minval=3)
+useST      = input.bool(false, "Supertrend confirmation", group=grpE)
+stLen      = input.int(10,  "Supertrend ATR len",  group=grpE, minval=1)
+stMult     = input.float(3.0,"Supertrend mult",    group=grpE, step=0.1)
+allowLong  = input.bool(true, "Allow longs",       group=grpE)
+allowShort = input.bool(true, "Allow shorts",      group=grpE)
+
+grpR = "Risk"
+atrLen     = input.int(14,  "ATR length",          group=grpR, minval=1)
+atrMultSL  = input.float(3.0,"Stop = ATR x",       group=grpR, step=0.1)
+rrRatio    = input.float(3.0,"Target = R multiple",group=grpR, step=0.1)
+riskPct    = input.float(1.0,"Risk % of equity per trade", group=grpR, step=0.1,
+                          tooltip="Position size is derived from the stop distance so every trade risks the same % of equity.")
+maxHold    = input.int(48,  "Max hold (bars)",     group=grpR, minval=1,
+     tooltip="48 bars = 2 days on 1h. NIFTY's original forced same-day square-off has no crypto equivalent.")
+
+grpF = "Filters"
+useADX     = input.bool(false,"ADX trend-strength filter", group=grpF)
+adxLen     = input.int(14,  "ADX length",          group=grpF)
+adxMin     = input.float(20,"ADX minimum",         group=grpF)
+useHTF     = input.bool(false,"Higher-timeframe trend filter", group=grpF)
+htfEmaLen  = input.int(200, "HTF EMA length (bars, current TF)", group=grpF)
+useVol     = input.bool(false,"Volume confirmation", group=grpF)
+volMult    = input.float(1.2,"Volume > x 20-bar avg", group=grpF, step=0.1)
+useRSI     = input.bool(false,"RSI band filter",   group=grpF)
+rsiLen     = input.int(14,  "RSI length",          group=grpF)
+rsiLo      = input.float(40,"RSI min (longs)",     group=grpF)
+rsiHi      = input.float(70,"RSI max (longs)",     group=grpF)
+useHour    = input.bool(false,"UTC hour filter",   group=grpF)
+hourFrom   = input.int(0,   "From UTC hour",       group=grpF, minval=0, maxval=23)
+hourTo     = input.int(23,  "To UTC hour",         group=grpF, minval=0, maxval=23)
+
+grpX = "Exit management"
+useTrail   = input.bool(false,"ATR trailing stop", group=grpX,
+     tooltip="Optimizer selected OFF on all three pairs: trailing cut winners short more often than it saved losers.")
+trailATR   = input.float(3.0,"Trail = ATR x",      group=grpX, step=0.1)
+useBE      = input.bool(false,"Move stop to break-even", group=grpX)
+beAtR      = input.float(1.0,"Break-even after R",  group=grpX, step=0.1)
+usePartial = input.bool(false,"Partial profit",    group=grpX,
+     tooltip="Selected OFF: with a ~37% win rate the few large winners carry the strategy, so halving them hurts.")
+partAtR    = input.float(1.0,"Take 50% at R",      group=grpX, step=0.1)
+cooldownB  = input.int(20,  "Cooldown bars after a trade", group=grpX, minval=0)
+
+grpM = "Money management / protection"
+useDailyStop = input.bool(true, "Max daily loss stop", group=grpM)
+dailyLossPct = input.float(3.0,"Max daily loss %",   group=grpM, step=0.5)
+useLossStreak= input.bool(true, "Consecutive-loss cooldown", group=grpM)
+maxLosses    = input.int(3,  "Consecutive losses",   group=grpM, minval=1)
+streakPause  = input.int(24, "Pause bars after streak", group=grpM, minval=1)
+
+// ----------------------------------------------------------------------------
+// INDICATORS
+// ----------------------------------------------------------------------------
+emaFast = ta.ema(close, emaFastLen)
+emaSlow = ta.ema(close, emaSlowLen)
+atr     = ta.atr(atrLen)
+htfEma  = ta.ema(close, htfEmaLen)
+adxVal  = ta.dmi(adxLen, adxLen).get(2)          // ADX component
+rsiVal  = ta.rsi(close, rsiLen)
+volAvg  = ta.sma(volume, 20)
+[stVal, stDir] = ta.supertrend(stMult, stLen)    // stDir: -1 up, 1 down
+
+plot(emaFast, "EMA fast", color.new(color.aqua, 0))
+plot(emaSlow, "EMA slow", color.new(color.orange, 0))
+plot(useHTF ? htfEma : na, "HTF EMA", color.new(color.gray, 0), linewidth=2)
+
+// ----------------------------------------------------------------------------
+// FILTERS
+// ----------------------------------------------------------------------------
+hourOk   = not useHour or (hour >= hourFrom and hour <= hourTo)
+adxOk    = not useADX or adxVal >= adxMin
+volOk    = not useVol or volume > volMult * volAvg
+htfUpOk  = not useHTF or close > htfEma
+htfDnOk  = not useHTF or close < htfEma
+stUpOk   = not useST  or stDir < 0
+stDnOk   = not useST  or stDir > 0
+rsiUpOk  = not useRSI or (rsiVal >= rsiLo and rsiVal <= rsiHi)
+rsiDnOk  = not useRSI or (rsiVal >= 100 - rsiHi and rsiVal <= 100 - rsiLo)
+
+// ----------------------------------------------------------------------------
+// PROTECTION: daily loss cap + consecutive-loss cooldown
+// ----------------------------------------------------------------------------
+var float dayStartEquity = strategy.equity
+if ta.change(time("D")) != 0
+    dayStartEquity := strategy.equity
+dailyDD    = dayStartEquity > 0 ? (dayStartEquity - strategy.equity) / dayStartEquity * 100 : 0.0
+dailyBlock = useDailyStop and dailyDD >= dailyLossPct
+
+var int lossStreak  = 0
+var int pauseUntil  = 0
+if strategy.closedtrades > 0 and ta.change(strategy.closedtrades) != 0
+    lastPnl = strategy.closedtrades.profit(strategy.closedtrades - 1)
+    lossStreak := lastPnl < 0 ? lossStreak + 1 : 0
+    if useLossStreak and lossStreak >= maxLosses
+        pauseUntil := bar_index + streakPause
+        lossStreak := 0
+streakBlock = bar_index < pauseUntil
+
+var int lastExitBar = -100000
+cooldownOk = bar_index - lastExitBar >= cooldownB
+if strategy.position_size == 0 and strategy.position_size[1] != 0
+    lastExitBar := bar_index
+
+tradingOk = hourOk and adxOk and volOk and cooldownOk and not dailyBlock and not streakBlock
+
+// ----------------------------------------------------------------------------
+// ENTRIES  (signal on close, fill next bar — no lookahead)
+// ----------------------------------------------------------------------------
+crossUp   = ta.crossover(emaFast, emaSlow)
+crossDown = ta.crossunder(emaFast, emaSlow)
+
+longSig  = allowLong  and crossUp   and stUpOk and htfUpOk and rsiUpOk and tradingOk
+shortSig = allowShort and crossDown and stDnOk and htfDnOk and rsiDnOk and tradingOk
+
+// Risk-based position size: qty such that (stop distance x qty) = riskPct of equity
+stopDist = atrMultSL * atr
+qty      = stopDist > 0 ? (strategy.equity * riskPct / 100) / stopDist : na
+
+if longSig and strategy.position_size == 0 and not na(qty)
+    strategy.entry("L", strategy.long, qty=qty)
+if shortSig and strategy.position_size == 0 and not na(qty)
+    strategy.entry("S", strategy.short, qty=qty)
+
+// ----------------------------------------------------------------------------
+// EXITS: stop / target / partial / break-even / trailing / max-hold
+// ----------------------------------------------------------------------------
+var float entryPx   = na
+var float initStop  = na
+var float curStop   = na
+var float target    = na
+var int   entryBar  = na
+var bool  partDone  = false
+var bool  beDone    = false
+
+if strategy.position_size != 0 and strategy.position_size[1] == 0
+    entryPx  := strategy.position_avg_price
+    initStop := strategy.position_size > 0 ? entryPx - stopDist : entryPx + stopDist
+    curStop  := initStop
+    target   := strategy.position_size > 0 ? entryPx + rrRatio * stopDist : entryPx - rrRatio * stopDist
+    entryBar := bar_index
+    partDone := false
+    beDone   := false
+
+isLong  = strategy.position_size > 0
+inTrade = strategy.position_size != 0
+rNow    = inTrade and not na(entryPx) and stopDist > 0 ? (isLong ? close - entryPx : entryPx - close) / stopDist : 0.0
+
+if inTrade
+    // partial profit
+    if usePartial and not partDone and rNow >= partAtR
+        strategy.close(isLong ? "L" : "S", qty_percent=50, comment="partial")
+        partDone := true
+    // break-even
+    if useBE and not beDone and rNow >= beAtR
+        curStop := entryPx
+        beDone  := true
+    // ATR trailing
+    if useTrail
+        curStop := isLong ? math.max(curStop, high - trailATR * atr)
+                          : math.min(curStop, low  + trailATR * atr)
+    // max hold
+    if bar_index - entryBar >= maxHold
+        strategy.close_all(comment="max hold")
+
+    strategy.exit(isLong ? "XL" : "XS", from_entry = isLong ? "L" : "S",
+                  stop = curStop, limit = target)
+
+// Flatten if a protection rule trips while in a position
+if inTrade and (dailyBlock or streakBlock)
+    strategy.close_all(comment="risk block")
+
+// ----------------------------------------------------------------------------
+// VISUALS
+// ----------------------------------------------------------------------------
+plot(inTrade ? curStop : na, "Stop",   color.new(color.red, 0),   style=plot.style_linebr)
+plot(inTrade ? target  : na, "Target", color.new(color.green, 0), style=plot.style_linebr)
+bgcolor(dailyBlock ? color.new(color.red, 90) : streakBlock ? color.new(color.orange, 92) : na)

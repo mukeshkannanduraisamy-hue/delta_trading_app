@@ -30,6 +30,9 @@
         <li><a href="/strategy" class="{% block nav_strategy %}{% endblock %}">Strategy</a></li>
         <li><a href="/journal" class="{% block nav_journal %}{% endblock %}">Journal</a></li>
         <li><a href="/performance" class="{% block nav_performance %}{% endblock %}">Performance</a></li>
+        <li><a href="/backtest" class="{% block nav_backtest %}{% endblock %}">Backtest</a></li>
+        <li><a href="/research" class="{% block nav_research %}{% endblock %}">Research</a></li>
+        <li><a href="/volatility" class="{% block nav_volatility %}{% endblock %}">Volatility</a></li>
       </ul>
     </div>
     <div class="nav-right">
@@ -44,6 +47,7 @@
     {% block content %}{% endblock %}
   </main>
 
+  <script src="/static/js/wsclient.js"></script>
   <script src="/static/js/app.js"></script>
   {% block extra_js %}{% endblock %}
 </body>

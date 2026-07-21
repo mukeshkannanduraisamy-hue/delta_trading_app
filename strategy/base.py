@@ -50,6 +50,10 @@ class Strategy:
     basis: str = "underlying"      # "underlying" | "premium"
     lookback: int = 120            # candles to fetch
     description: str = ""
+    # False for strategies that consult a live external service: replaying them
+    # would query that service with TODAY's state while pretending to be at a
+    # historical bar (lookahead), and cost real money per bar.
+    backtestable: bool = True
 
     def __init__(self, enabled: bool = False, **params) -> None:
         self.enabled = enabled

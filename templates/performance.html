@@ -1,0 +1,54 @@
+{% extends "base.html" %}
+{% block title %}Performance — Delta Trading{% endblock %}
+{% block nav_performance %}active{% endblock %}
+
+{% block content %}
+<style>
+  .pwrap { display:flex; flex-direction:column; gap:var(--gap); padding:20px; max-width:1400px; margin:0 auto; }
+  .kpis { display:grid; grid-template-columns:repeat(4,1fr); gap:12px; }
+  @media (max-width:1000px){ .kpis { grid-template-columns:repeat(2,1fr); } }
+  .kpi { background:var(--card-bg); border:1px solid var(--border); border-radius:var(--radius); padding:14px 16px; }
+  .kpi .k { font-size:10.5px; color:var(--text-dim); text-transform:uppercase; letter-spacing:.4px; }
+  .kpi .v { font-size:22px; font-weight:800; font-variant-numeric:tabular-nums; margin-top:4px; }
+  .kpi .sub { font-size:11px; color:var(--text-dim); margin-top:2px; }
+  .pos { color:var(--success); } .neg { color:var(--danger); }
+  .panel { background:var(--card-bg); border:1px solid var(--border); border-radius:var(--radius); }
+  .panel h3 { margin:0; padding:12px 16px; border-bottom:1px solid var(--border); font-size:13px;
+    text-transform:uppercase; letter-spacing:.5px; color:var(--text-dim); }
+  .panel .body { padding:16px; }
+  #equity { width:100%; height:320px; display:block; }
+  table.t { width:100%; border-collapse:collapse; font-size:12.5px; }
+  table.t th { text-align:left; color:var(--text-dim); font-weight:600; font-size:10.5px; text-transform:uppercase;
+    letter-spacing:.4px; padding:8px 12px; border-bottom:1px solid var(--border); }
+  table.t td { padding:8px 12px; border-bottom:1px solid var(--border); font-variant-numeric:tabular-nums; }
+  table.t tr:last-child td { border-bottom:none; }
+  .bar { height:6px; border-radius:3px; background:var(--card-bg-2); position:relative; overflow:hidden; min-width:60px; }
+  .bar > span { position:absolute; top:0; bottom:0; }
+  .empty { color:var(--text-dim); padding:24px; text-align:center; }
+</style>
+
+<div class="pwrap">
+  <div class="kpis">
+    <div class="kpi"><div class="k">Total Net P&L</div><div class="v" id="k-pnl">—</div><div class="sub" id="k-equity"></div></div>
+    <div class="kpi"><div class="k">Win Rate</div><div class="v" id="k-winrate">—</div><div class="sub" id="k-wl"></div></div>
+    <div class="kpi"><div class="k">Profit Factor</div><div class="v" id="k-pf">—</div><div class="sub" id="k-avg"></div></div>
+    <div class="kpi"><div class="k">Max Drawdown</div><div class="v neg" id="k-dd">—</div><div class="sub" id="k-trades"></div></div>
+  </div>
+
+  <div class="panel">
+    <h3>Equity Curve</h3>
+    <div class="body"><canvas id="equity"></canvas><div id="eq-empty" class="empty" style="display:none;">No closed trades yet — the curve appears once trades settle.</div></div>
+  </div>
+
+  <div class="panel">
+    <h3>By Strategy</h3>
+    <div class="body" style="padding:0;">
+      <table class="t"><thead><tr>
+        <th>Strategy</th><th>Trades</th><th>Wins</th><th>Losses</th><th>Win rate</th><th>Net P&L</th><th style="width:30%"></th>
+      </tr></thead><tbody id="per-rows"><tr><td colspan="7" class="empty">Loading…</td></tr></tbody></table>
+    </div>
+  </div>
+</div>
+{% endblock %}
+
+{% block extra_js %}<script src="/static/js/performance.js"></script>{% endblock %}

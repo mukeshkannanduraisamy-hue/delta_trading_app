@@ -116,7 +116,10 @@ def supertrend(
         close_i = float(candles[i]["close"])
         prev_close = float(candles[i - 1]["close"]) if i > 0 else close_i
 
-        if final_upper[i - 1] is None:
+        # `i == 0` must be checked explicitly: final_upper[-1] would wrap to the
+        # LAST element of the list, which only happens to be None because the
+        # list starts empty. That is luck, not logic (audit #19).
+        if i == 0 or final_upper[i - 1] is None:
             final_upper[i] = basic_upper
             final_lower[i] = basic_lower
             direction[i] = 1 if close_i >= basic_lower else -1

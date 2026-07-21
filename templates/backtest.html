@@ -1,0 +1,70 @@
+{% extends "base.html" %}
+{% block title %}Backtest — Delta Trading{% endblock %}
+{% block nav_backtest %}active{% endblock %}
+
+{% block content %}
+<style>
+  .bwrap { display:flex; flex-direction:column; gap:var(--gap); padding:20px; max-width:1400px; margin:0 auto; }
+  .controls { display:flex; gap:16px; align-items:flex-end; flex-wrap:wrap;
+    background:var(--card-bg); border:1px solid var(--border); border-radius:var(--radius); padding:14px 18px; }
+  .controls label { font-size:11px; color:var(--text-dim); text-transform:uppercase; letter-spacing:.4px; display:flex; flex-direction:column; gap:5px; }
+  .controls select { background:var(--card-bg-2); color:var(--text); border:1px solid var(--border); border-radius:6px; padding:7px 10px; font-size:13px; min-width:120px; }
+  .btn { border:1px solid var(--success); background:var(--success); color:#06210f; padding:9px 18px; border-radius:6px; font-weight:700; cursor:pointer; font-size:13px; }
+  .btn:disabled { opacity:.5; cursor:progress; }
+  .status { margin-left:auto; font-size:12.5px; color:var(--text-dim); }
+  .panel { background:var(--card-bg); border:1px solid var(--border); border-radius:var(--radius); }
+  .panel h3 { margin:0; padding:12px 16px; border-bottom:1px solid var(--border); font-size:13px;
+    text-transform:uppercase; letter-spacing:.5px; color:var(--text-dim); }
+  table.t { width:100%; border-collapse:collapse; font-size:12.5px; }
+  table.t th { text-align:right; color:var(--text-dim); font-weight:600; font-size:10.5px; text-transform:uppercase;
+    letter-spacing:.4px; padding:9px 12px; border-bottom:1px solid var(--border); }
+  table.t th:first-child, table.t td:first-child { text-align:left; }
+  table.t td { padding:9px 12px; border-bottom:1px solid var(--border); font-variant-numeric:tabular-nums; text-align:right; }
+  table.t tr:last-child td { border-bottom:none; }
+  .pos { color:var(--success); } .neg { color:var(--danger); }
+  .verdict { font-weight:700; }
+  .tag { font-size:10px; font-weight:700; padding:2px 7px; border-radius:4px; background:var(--card-bg-2); color:var(--text-dim); }
+  .note { font-size:12px; color:var(--warning); background:rgba(210,153,34,.1); border:1px solid rgba(210,153,34,.3);
+    border-radius:6px; padding:11px 14px; line-height:1.5; }
+  .skip { font-size:12px; color:var(--text-dim); }
+  .empty { color:var(--text-dim); padding:24px; text-align:center; }
+</style>
+
+<div class="bwrap">
+  <div class="note">
+    <strong>What this measures:</strong> the directional edge of each strategy's signals on the BTC underlying —
+    did price reach a +target (rr × ATR) before a −stop (1 × ATR). It deliberately excludes option premium, theta,
+    and the bid/ask spread. <strong>Positive expectancy is necessary but not sufficient</strong> for the option trade
+    to profit; negative expectancy means the signal has no edge to begin with, and no execution tweak can rescue it.
+  </div>
+
+  <div class="controls">
+    <label>History<select id="days">
+      <option value="3">3 days</option>
+      <option value="7" selected>7 days</option>
+      <option value="14">14 days</option>
+      <option value="30">30 days</option>
+    </select></label>
+    <label>Max hold (bars)<select id="maxhold">
+      <option value="15">15</option>
+      <option value="30" selected>30</option>
+      <option value="60">60</option>
+      <option value="120">120</option>
+    </select></label>
+    <button class="btn" id="run">Run backtest</button>
+    <span class="status" id="status">Ready.</span>
+  </div>
+
+  <div class="panel">
+    <h3>Results — expectancy per trade, in R (risk multiples)</h3>
+    <table class="t"><thead><tr>
+      <th>Strategy</th><th>TF</th><th>Trades</th><th>Win %</th><th>Expectancy (R)</th>
+      <th>Total R</th><th>Profit factor</th><th>Avg win</th><th>Avg loss</th><th>Verdict</th>
+    </tr></thead><tbody id="rows"><tr><td colspan="10" class="empty">Click “Run backtest”.</td></tr></tbody></table>
+  </div>
+
+  <div id="skipped" class="skip"></div>
+</div>
+{% endblock %}
+
+{% block extra_js %}<script src="/static/js/backtest.js"></script>{% endblock %}

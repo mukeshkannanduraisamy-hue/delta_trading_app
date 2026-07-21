@@ -115,16 +115,19 @@
     <!-- Right: account + stats -->
     <div style="display:flex; flex-direction:column; gap: var(--gap);">
       <div class="panel">
-        <h3>Paper Account</h3>
+        <h3 id="acct-title">Delta Account (testnet)</h3>
         <div class="body">
           <div class="stat-grid">
-            <div class="stat-box"><div class="k">Balance</div><div class="v" id="s-balance">—</div></div>
+            <div class="stat-box"><div class="k">Account USD</div><div class="v" id="s-balance">—</div></div>
+            <div class="stat-box"><div class="k">Available</div><div class="v" id="s-avail">—</div></div>
             <div class="stat-box"><div class="k">Realized P&L</div><div class="v" id="s-pnl">—</div></div>
             <div class="stat-box"><div class="k">Win rate</div><div class="v" id="s-winrate">—</div></div>
             <div class="stat-box"><div class="k">Open</div><div class="v" id="s-open">0</div></div>
             <div class="stat-box"><div class="k">Closed</div><div class="v" id="s-closed">0</div></div>
             <div class="stat-box"><div class="k">W / L</div><div class="v" id="s-wl">0 / 0</div></div>
+            <div class="stat-box"><div class="k">Sync</div><div class="v" id="s-sync">—</div></div>
           </div>
+          <div id="s-source" style="font-size:11px;color:var(--text-dim);margin-top:6px"></div>
         </div>
       </div>
       <div class="panel">

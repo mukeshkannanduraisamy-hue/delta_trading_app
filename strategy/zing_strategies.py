@@ -34,6 +34,11 @@ class EMACross(Strategy):
     )
 
     def evaluate(self, ctx: Context) -> list[Signal]:
+        # Self-guard the length before any negative indexing: a strategy must be
+        # safe for any caller, not only for an engine that happens to pre-check
+        # (audit #18).
+        if len(ctx.underlying) < 22:
+            return []
         c = ind.closes(ctx.underlying)
         fast, slow = ind.ema(c, 9), ind.ema(c, 21)
         if fast[-1] is None or slow[-1] is None or fast[-2] is None or slow[-2] is None:
@@ -61,9 +66,11 @@ class ScalpingPulse(Strategy):
 
     def evaluate(self, ctx: Context) -> list[Signal]:
         u = ctx.underlying
+        if len(u) < 22:
+            return []
         c = ind.closes(u)
         fast, slow = ind.ema(c, 9), ind.ema(c, 21)
-        if any(x[-1] is None for x in (fast, slow)) or len(u) < 4:
+        if any(x[-1] is None for x in (fast, slow)):
             return []
         sl, rr = self.params.get("sl_pct", 0.06), self.params.get("rr", 1.0)
         last, prev = u[-1], u[-2]
@@ -161,16 +168,20 @@ class MeanReversionBollinger(Strategy):
     )
 
     def evaluate(self, ctx: Context) -> list[Signal]:
+        if len(ctx.underlying) < 21:
+            return []
         c = ind.closes(ctx.underlying)
         mid, up, lo = ind.bollinger(c, 20, 2.0)
-        if up[-1] is None or lo[-1] is None:
+        if up[-1] is None or lo[-1] is None or up[-2] is None or lo[-2] is None:
             return []
         sl, rr = self.params.get("sl_pct", 0.08), self.params.get("rr", 1.5)
-        close = c[-1]
-        if close > up[-1]:
-            return [Signal(self.slug, "PE", "Close above upper Bollinger band (fade)", sl, rr)]
-        if close < lo[-1]:
-            return [Signal(self.slug, "CE", "Close below lower Bollinger band (fade)", sl, rr)]
+        prev, close = c[-2], c[-1]
+        # Fire on the CROSS beyond a band (the extreme event), not on every
+        # candle that remains outside it.
+        if close > up[-1] and prev <= up[-2]:
+            return [Signal(self.slug, "PE", "Close crossed above upper Bollinger band (fade)", sl, rr)]
+        if close < lo[-1] and prev >= lo[-2]:
+            return [Signal(self.slug, "CE", "Close crossed below lower Bollinger band (fade)", sl, rr)]
         return []
 
 
@@ -190,22 +201,28 @@ class PrimeScalperEMA(Strategy):
 
     def evaluate(self, ctx: Context) -> list[Signal]:
         u = ctx.underlying
+        if len(u) < 25:
+            return []
         c = ind.closes(u)
         e = ind.ema(c, 21)
         a = ind.atr(u, 14)
-        if e[-1] is None or a[-1] is None or a[-1] == 0 or len(u) < 5:
+        if e[-1] is None or a[-1] is None or a[-1] == 0:
             return []
         raw_slope = ind.slope(e, len(e) - 1, 3)
-        if raw_slope is None:
+        prev_slope = ind.slope(e, len(e) - 2, 3)
+        if raw_slope is None or prev_slope is None or not a[-2]:
             return []
         norm = raw_slope / a[-1]
+        prev_norm = prev_slope / a[-2]
         thr = self.params.get("threshold", 0.05)
         sl, rr = self.params.get("sl_pct", 0.06), self.params.get("rr", 1.2)
         last = u[-1]
-        if norm > thr and c[-1] > e[-1] and _green(last):
-            return [Signal(self.slug, "CE", f"Bull EMA momentum (norm slope {norm:.3f})", sl, rr)]
-        if norm < -thr and c[-1] < e[-1] and not _green(last):
-            return [Signal(self.slug, "PE", f"Bear EMA momentum (norm slope {norm:.3f})", sl, rr)]
+        # Blog wording: the slope CROSSES the threshold — fire on the crossing
+        # candle only, so persisting momentum doesn't re-signal every bar.
+        if prev_norm <= thr < norm and c[-1] > e[-1] and _green(last):
+            return [Signal(self.slug, "CE", f"Bull momentum cross (norm slope {norm:.3f})", sl, rr)]
+        if prev_norm >= -thr > norm and c[-1] < e[-1] and not _green(last):
+            return [Signal(self.slug, "PE", f"Bear momentum cross (norm slope {norm:.3f})", sl, rr)]
         return []
 
 
@@ -225,9 +242,14 @@ class SwingKingSniper(Strategy):
 
     def evaluate(self, ctx: Context) -> list[Signal]:
         u = ctx.underlying
+        # Length check MUST come first: `e20[-4]` was evaluated before the
+        # `len(u) < 5` clause in the same or-chain, so a short series raised
+        # IndexError instead of returning no signal (audit #17).
+        if len(u) < 51:
+            return []
         c = ind.closes(u)
         e20, e50 = ind.ema(c, 20), ind.ema(c, 50)
-        if e20[-1] is None or e50[-1] is None or e20[-4] is None or len(u) < 5:
+        if e20[-1] is None or e50[-1] is None or e20[-4] is None:
             return []
         sl = self.params.get("sl_pct", 0.12)
         rr = self.params.get("rr", 2.0)
@@ -261,16 +283,21 @@ class BoomingBullsSupertrend(Strategy):
     )
 
     def _variant(self, side: str, candles: list[dict]) -> list[Signal]:
-        if not candles or len(candles) < 25:
+        if not candles or len(candles) < 26:
             return []
         c = ind.closes(candles)
         s = ind.sma(c, 20)
         fast_line, _ = ind.supertrend(candles, 10, 2.0)
         slow_line, _ = ind.supertrend(candles, 20, 3.0)
-        if s[-1] is None or fast_line[-1] is None or slow_line[-1] is None:
+        if any(x[-1] is None or x[-2] is None for x in (s, fast_line, slow_line)):
             return []
-        price = c[-1]
-        if price > s[-1] and price > fast_line[-1] and price > slow_line[-1]:
+
+        def _above(i: int) -> bool:
+            return c[i] > s[i] and c[i] > fast_line[i] and c[i] > slow_line[i]
+
+        # Blog: the ALERT stage "triggers" — fire when the bullish structure
+        # becomes newly true, not on every bar it stays true.
+        if _above(-1) and not _above(-2):
             return [
                 Signal(
                     self.slug,
@@ -295,6 +322,8 @@ class BoomingBullsSupertrend(Strategy):
 # --------------------------------------------------------------------------- #
 # Registry
 # --------------------------------------------------------------------------- #
+from .ai_strategy import AIStrategy  # noqa: E402 — avoids a circular import at module top
+
 STRATEGY_CLASSES = [
     EMACross,
     ScalpingPulse,
@@ -304,4 +333,5 @@ STRATEGY_CLASSES = [
     PrimeScalperEMA,
     SwingKingSniper,
     BoomingBullsSupertrend,
+    AIStrategy,
 ]

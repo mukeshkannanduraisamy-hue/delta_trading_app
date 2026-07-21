@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import threading
 import time
 from collections import deque
 from datetime import datetime, timezone
@@ -14,13 +15,24 @@ class Journal:
     def __init__(self, maxlen: int = 500) -> None:
         self.events: deque = deque(maxlen=maxlen)
         self.path = config.JOURNAL_DIR / "trades.jsonl"
+        # record() runs on the engine worker thread while recent() serves API
+        # requests from the event loop — guard the deque against concurrent
+        # mutation-during-iteration.
+        self._lock = threading.Lock()
 
     def _stamp(self) -> str:
         return datetime.now(timezone.utc).isoformat()
 
     def record(self, kind: str, data: dict) -> dict:
         event = {"ts": time.time(), "iso": self._stamp(), "kind": kind, **data}
-        self.events.appendleft(event)
+        with self._lock:
+            self.events.appendleft(event)
+        # Push to any live dashboards immediately — no polling delay.
+        try:
+            from .eventbus import bus as _bus
+            _bus.publish("journal", event)
+        except Exception:  # noqa: BLE001 — never let the UI break the engine
+            pass
         try:
             with open(self.path, "a", encoding="utf-8") as fh:
                 fh.write(json.dumps(event) + "\n")
@@ -29,7 +41,8 @@ class Journal:
         return event
 
     def recent(self, limit: int = 100) -> list[dict]:
-        return list(self.events)[:limit]
+        with self._lock:
+            return list(self.events)[:limit]
 
 
 journal = Journal()

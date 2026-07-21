@@ -1,4 +1,24 @@
-# Phase 4 — Zing Trade Strategy Engine
+# Delta Trading App — Strategy Engine & Research Platform
+
+> **Project status: COMPLETE (all 7 phases). Verdict: no validated edge — do not deploy capital.**
+>
+> | Test | Result |
+> |------|--------|
+> | 8 Zing strategies, 7-day directional backtest | **All negative** (−0.37 to −1.34 R/trade) |
+> | 30-combo walk-forward screen (5 families × 5m/15m/1h) | **0 survivors** (none positive in both train *and* test) |
+> | Variance risk premium (IV vs realized vol) | **≈0, inconclusive** (avg VRP −0.29) |
+> | IV surface / skew | **Normal** (RR25 ≈ −0.95) — nothing obviously mispriced |
+>
+> All of the above *exclude* option spread and theta, so they are the optimistic
+> bound. Real option trades are worse. Live testnet behaviour confirms it: market
+> orders pay a ~15% spread and instant-stop, limit orders rest and rarely fill.
+> `ENGINE_AUTOSTART` is therefore **false** — start the engine manually if you want.
+>
+> **Pages:** `/` dashboard + health · `/option-chain` · `/strategy` engine control ·
+> `/journal` trades · `/performance` analytics · `/backtest` strategy scoring ·
+> `/research` walk-forward screen · `/volatility` VRP + skew lab.
+
+## Phase 4 — Zing Trade Strategy Engine
 
 An automated options strategy engine that implements the eight strategies
 published on the [Zing Trade blog](https://zing.trade/blog/category/strategies/),
@@ -87,6 +107,59 @@ journal.py         append-only JSONL trade log (strategy/journal/trades.jsonl)
 - `POST /api/strategy/flatten` — close all open positions
 - `GET /api/strategy/journal?limit=` — trade feed
 - `GET /api/account` — live testnet demo balances + positions (signed)
+
+## Hardening (2026-07-20 retune)
+
+- **Once per closed candle:** strategies never see the forming bar and fire at
+  most once per closed candle, with true *cross* semantics (band cross, slope
+  threshold cross, Supertrend newly-above) instead of re-firing on a state.
+- **Cooldown:** after a close, the same (strategy, direction) is blocked for
+  `ENGINE_COOLDOWN_BARS` (default 5) bars.
+- **Fill verification:** live orders check `state`/`unfilled_size`; partial
+  fills track only the filled size; unfilled entries are never tracked.
+- **No double-sells:** a network-ambiguous order (timeout) marks the position
+  and reconciles the exchange's actual size before any retry.
+- **Exits always run:** `manage()` executes before anything else each cycle,
+  per-position isolated, with expiry settlement (12:00 UTC) and time exits that
+  work even when the quote is dead. A prod-API outage cannot freeze stops.
+- **Reconciliation:** every 20 cycles (live mode) the engine compares its book
+  with the exchange and journals any mismatch (`reconcile_mismatch`).
+- **Rate safety:** `ENGINE_POLL_SECONDS` is clamped to a 5-second floor.
+- **Autostart:** with `ENGINE_AUTOSTART=true`, all strategies are enabled at
+  boot (`ENGINE_ENABLED_STRATEGIES` to override with a slug list).
+
+**Known operational gotcha:** if your public IP changes (dynamic IP), Delta
+rejects orders with `ip_not_whitelisted_for_api_key` — the journal shows the
+exact client IP to add to the key's whitelist on demo.delta.exchange.
+
+## Phases 5–7 — analytics, research, health
+
+- **Phase 5 — Journal & Performance.** Every realized close is persisted to
+  SQLite (`strategy/store.py`, `strategy/journal/trades.db`). `/journal` is a
+  filterable trade table; `/performance` shows P&L, win rate, profit factor,
+  max drawdown and a pure-canvas equity curve.
+- **Phase 6 — Validation harnesses.** `/backtest` replays each strategy's real
+  `evaluate()` over history and scores directional edge in R multiples.
+  `/research` runs a walk-forward screen (train/test split) across signal
+  families — **use this as the gate for any new idea before it goes live.**
+- **Phase 7 — Health & notifications.** `/api/health` reports auth status
+  (including the exact non-whitelisted IP), engine state, data collection
+  progress and recent problems in one call. The dashboard shows it as a live
+  strip, and critical events raise desktop notifications.
+- **Volatility lab.** `/volatility` measures the variance risk premium and the
+  full IV surface (25-delta risk reversal + butterfly, interpolated on the
+  contracts' own deltas). An `iv_collector` task records a snapshot **every 30
+  minutes** — running even when the engine is stopped, and never placing orders —
+  so the forward series needed for a genuine VRP test accumulates over time.
+
+## Performance notes
+
+The engine gates all work on a per-timeframe **bar clock**: with a 5s poll and
+1m bars, 11 of every 12 cycles have no newly-closed candle, so they skip candle
+and option-chain fetches entirely. The ATM chain is resolved lazily (only when a
+strategy could actually act) and cached ~10s; exit quotes are cached ~3s so
+several positions sharing one contract cost a single quote. Measured effect:
+option-chain fetches 8→1 and candle fetches ~32→7 across 8 cycles.
 
 ## Caveats / honest limitations
 
