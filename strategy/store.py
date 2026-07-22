@@ -100,13 +100,15 @@ def init_db() -> None:
             c.execute("ALTER TABLE trades ADD COLUMN confidence INTEGER DEFAULT 50")
         if "leverage" not in have_trades:
             c.execute("ALTER TABLE trades ADD COLUMN leverage INTEGER DEFAULT 1")
+        if "entry_iv" not in have_trades:
+            c.execute("ALTER TABLE trades ADD COLUMN entry_iv REAL")
 
 
 def record_trade(row: dict) -> None:
     cols = (
         "ts_open", "ts_close", "strategy", "direction", "symbol", "strike",
         "expiry", "entry_price", "exit_price", "contracts", "contract_value",
-        "gross_pnl", "net_pnl", "why", "mode", "partial", "confidence", "leverage"
+        "gross_pnl", "net_pnl", "why", "mode", "partial", "confidence", "leverage", "entry_iv"
     )
     try:
         with _write_lock, _conn() as c:

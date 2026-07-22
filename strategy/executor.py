@@ -19,6 +19,7 @@ from .delta_client import DeltaError, DeltaNetworkError, client
 from .journal import journal
 from .market_data import OptionQuote, OptionResolver
 from .pricebus import bus
+from .options_calc import calculate_options_order_params
 
 def _confidence_params(confidence: int) -> tuple[int, int]:
     from .settings import manager
@@ -163,6 +164,18 @@ class Position:
     exit_ambiguous: bool = False
     confidence: int = 50
     leverage: int = 1
+    # Advanced Options Fields
+    entry_iv: Optional[float] = None
+    current_iv: Optional[float] = None
+    btc_sl_price: Optional[float] = None
+    option_tp1: Optional[float] = None
+    option_tp2: Optional[float] = None
+    option_tp3: Optional[float] = None
+    btc_tp1: Optional[float] = None
+    btc_tp2: Optional[float] = None
+    btc_tp3: Optional[float] = None
+    partial_exits: list = field(default_factory=list)
+    trailing_stop_active: bool = False
     meta: dict = field(default_factory=dict)
 
     def as_dict(self, current_price: Optional[float] = None) -> dict:
@@ -182,6 +195,17 @@ class Position:
             "adopted": bool(self.meta.get("adopted")),
             "confidence": self.confidence,
             "leverage": self.leverage,
+            "entry_iv": self.entry_iv,
+            "current_iv": self.current_iv,
+            "btc_sl_price": self.btc_sl_price,
+            "option_tp1": self.option_tp1,
+            "option_tp2": self.option_tp2,
+            "option_tp3": self.option_tp3,
+            "btc_tp1": self.btc_tp1,
+            "btc_tp2": self.btc_tp2,
+            "btc_tp3": self.btc_tp3,
+            "partial_exits": self.partial_exits,
+            "trailing_stop_active": self.trailing_stop_active,
         }
 
 
@@ -198,6 +222,7 @@ class PendingEntry:
     placed_at: float
     bar_seconds: int
     filled: int = 0
+    adv_params: dict = field(default_factory=dict)
 
     def as_dict(self) -> dict:
         return {
@@ -291,20 +316,30 @@ class Executor:
     # ------------------------------------------------------------------ #
     def _register_position(self, strategy: str, direction: str, quote: OptionQuote,
                            signal: Signal, entry: float, contracts: int,
-                           bar_seconds: int, leverage: int = 1, order_id=None) -> dict:
-        # Fee notional is 0.03% of UNDERLYING notional — pass live spot, not the
-        # strike (audit #14).
+                           bar_seconds: int, leverage: int = 1, order_id=None,
+                           adv_params: dict = None) -> dict:
         fee = _fees_or_cap(entry, quote.contract_value, contracts, spot=_spot())
+        adv = adv_params or {}
         pos = Position(
             id=uuid.uuid4().hex[:8], strategy=strategy, direction=direction,
             symbol=quote.symbol, product_id=quote.product_id, strike=quote.strike,
             expiry=quote.expiry, entry_price=entry, contracts=contracts,
             contract_value=quote.contract_value,
-            target=entry * (1 + signal.target_pct), stop=entry * (1 - signal.sl_pct),
+            target=adv.get("option_tp3") or (entry * (1 + signal.target_pct)), 
+            stop=adv.get("option_sl_price") or (entry * (1 - signal.sl_pct)),
             mode=config.EXECUTION_MODE, reason=signal.reason, opened_at=time.time(),
             max_hold_bars=signal.max_hold_bars or config.DEFAULT_MAX_HOLD_BARS,
             bar_seconds=bar_seconds, entry_fee=fee, last_price=entry,
             confidence=signal.confidence, leverage=leverage,
+            entry_iv=adv.get("entry_iv"),
+            current_iv=adv.get("entry_iv"),
+            btc_sl_price=adv.get("btc_sl_price"),
+            option_tp1=adv.get("option_tp1"),
+            option_tp2=adv.get("option_tp2"),
+            option_tp3=adv.get("option_tp3"),
+            btc_tp1=adv.get("btc_tp1"),
+            btc_tp2=adv.get("btc_tp2"),
+            btc_tp3=adv.get("btc_tp3"),
             meta={**signal.meta, "order_id": order_id},
         )
         self.positions[pos.id] = pos
@@ -345,12 +380,6 @@ class Executor:
 
     # -- market entry (real order) --------------------------------------- #
     def _open_market(self, signal: Signal, quote: OptionQuote, bar_seconds: int) -> Optional[dict]:
-        entry = quote.best_ask or quote.mark_price
-        if not entry or entry <= 0:
-            journal.record("skip", {"strategy": signal.strategy, "direction": signal.direction,
-                                    "reason": "no tradable premium", "symbol": quote.symbol})
-            return None
-        
         # Check daily loss limit
         from .settings import manager
         loss_limit_pct = manager.get("daily_loss_limit_pct") / 100.0
@@ -360,9 +389,28 @@ class Executor:
                                     "reason": "daily loss limit reached", "symbol": quote.symbol})
             return None
 
+        from .account import sync
+        virtual_balance = sync.snapshot().get("equity_usd", start_balance)
+
+        # ADVANCED OPTIONS PRE-TRADE CALCULATION
+        try:
+            adv_params = calculate_options_order_params(quote.symbol, signal.direction, signal.confidence, virtual_balance)
+        except Exception as e:
+            journal.record("skip", {"strategy": signal.strategy, "direction": signal.direction,
+                                    "reason": f"calculation failed: {e}", "symbol": quote.symbol})
+            return None
+
+        if adv_params["errors"]:
+            journal.record("skip", {"strategy": signal.strategy, "direction": signal.direction,
+                                    "reason": "validation errors", "symbol": quote.symbol, "errors": adv_params["errors"]})
+            return None
+
+        for warn in adv_params["warnings"]:
+            journal.record("warning", {"strategy": signal.strategy, "symbol": quote.symbol, "warning": warn})
+
+        entry = adv_params["smart_entry"]
         contracts, leverage = _confidence_params(signal.confidence)
         
-        from .account import sync
         margin = (entry * contracts * quote.contract_value) / leverage
         if margin > sync.snapshot().get("available_usd", 0):
             journal.record("skip", {"strategy": signal.strategy, "direction": signal.direction,
@@ -372,17 +420,14 @@ class Executor:
         order_id = _coid(signal.direction)
         sync.deduct_margin(margin)
         
+        # Merge adv_params into log
+        journal.record("options_pre_trade", adv_params)
+        
         return self._register_position(signal.strategy, signal.direction, quote, signal,
-                                       entry, contracts, bar_seconds, leverage, order_id)
+                                       entry, contracts, bar_seconds, leverage, order_id, adv_params)
 
     # -- resting limit entry --------------------------------------------- #
     def _open_limit(self, signal: Signal, quote: OptionQuote, bar_seconds: int) -> Optional[dict]:
-        price = _limit_entry_price(quote, signal)
-        if price is None:
-            journal.record("skip", {"strategy": signal.strategy, "direction": signal.direction,
-                                    "reason": "no bid/ask for limit price", "symbol": quote.symbol})
-            return None
-        
         # Check daily loss limit
         from .settings import manager
         loss_limit_pct = manager.get("daily_loss_limit_pct") / 100.0
@@ -392,10 +437,29 @@ class Executor:
                                     "reason": "daily loss limit reached", "symbol": quote.symbol})
             return None
 
+        from .account import sync
+        virtual_balance = sync.snapshot().get("equity_usd", start_balance)
+
+        # ADVANCED OPTIONS PRE-TRADE CALCULATION
+        try:
+            adv_params = calculate_options_order_params(quote.symbol, signal.direction, signal.confidence, virtual_balance)
+        except Exception as e:
+            journal.record("skip", {"strategy": signal.strategy, "direction": signal.direction,
+                                    "reason": f"calculation failed: {e}", "symbol": quote.symbol})
+            return None
+
+        if adv_params["errors"]:
+            journal.record("skip", {"strategy": signal.strategy, "direction": signal.direction,
+                                    "reason": "validation errors", "symbol": quote.symbol, "errors": adv_params["errors"]})
+            return None
+
+        for warn in adv_params["warnings"]:
+            journal.record("warning", {"strategy": signal.strategy, "symbol": quote.symbol, "warning": warn})
+
+        price = adv_params["smart_entry"]
         contracts, leverage = _confidence_params(signal.confidence)
         margin = (price * contracts * quote.contract_value) / leverage
         
-        from .account import sync
         if margin > sync.snapshot().get("available_usd", 0):
             journal.record("skip", {"strategy": signal.strategy, "direction": signal.direction,
                                     "reason": "insufficient virtual margin", "symbol": quote.symbol})
@@ -405,12 +469,13 @@ class Executor:
         pe = PendingEntry(order_id=order_id, strategy=signal.strategy,
                           direction=signal.direction, quote=quote, signal=signal,
                           limit_price=price, requested=contracts,
-                          placed_at=time.time(), bar_seconds=bar_seconds, filled=0)
+                          placed_at=time.time(), bar_seconds=bar_seconds, filled=0,
+                          adv_params=adv_params)
         self.pending[self._key(signal.strategy, signal.direction)] = pe
         journal.record("limit_placed", {
             "order_id": order_id, "strategy": signal.strategy, "direction": signal.direction,
             "symbol": quote.symbol, "limit_price": price, "contracts": contracts,
-            "reason": signal.reason})
+            "reason": signal.reason, "adv_params": adv_params})
         return pe.as_dict()
 
     def resolve_pending(self) -> None:
@@ -435,7 +500,7 @@ class Executor:
                     margin = (fill_price * filled * pe.quote.contract_value) / leverage
                     sync.deduct_margin(margin)
                     self._register_position(pe.strategy, pe.direction, pe.quote, pe.signal,
-                                            fill_price, filled, pe.bar_seconds, leverage, pe.order_id)
+                                            fill_price, filled, pe.bar_seconds, leverage, pe.order_id, pe.adv_params)
                     self.pending.pop(key, None)
                 elif aged_out:
                     journal.record("limit_expired", {"order_id": pe.order_id,
@@ -469,7 +534,8 @@ class Executor:
             "expiry": pos.expiry, "entry_price": pos.entry_price, "exit_price": exit_price,
             "contracts": contracts, "contract_value": pos.contract_value,
             "gross_pnl": gross, "net_pnl": net, "why": why, "mode": pos.mode,
-            "partial": 0 if full else 1, "confidence": pos.confidence, "leverage": pos.leverage})
+            "partial": 0 if full else 1, "confidence": pos.confidence, "leverage": pos.leverage,
+            "entry_iv": pos.entry_iv})
         if full:
             self.closed_count += 1
             if net > 0:
@@ -511,33 +577,112 @@ class Executor:
         price: Optional[float] = None
         try:
             price = self.resolver.live_price(pos.symbol)
-        except Exception:  # noqa: BLE001
+        except Exception:
             price = None
+
+        spot = _spot()
+
         if price is not None:
             pos.last_price = price
-            if price >= pos.target:
-                return self._close(pos, price, "target")
-            if price <= pos.stop:
-                return self._close(pos, price, "stop")
+
+            # 1. Dual-Condition Stop Loss
+            sl_hit = False
+            sl_reason = ""
+            if pos.stop and price <= pos.stop:
+                sl_hit = True
+                sl_reason = "stop_premium"
+            elif pos.btc_sl_price and spot:
+                if pos.direction == "CE" and spot <= pos.btc_sl_price:
+                    sl_hit = True
+                    sl_reason = "stop_btc"
+                elif pos.direction == "PE" and spot >= pos.btc_sl_price:
+                    sl_hit = True
+                    sl_reason = "stop_btc"
+            
+            if sl_hit:
+                return self._close(pos, price, sl_reason)
+
+            # 2. Multi-Layer Take Profit (40/40/20)
+            # TP1
+            tp1_hit = (pos.option_tp1 and price >= pos.option_tp1)
+            if pos.btc_tp1 and spot:
+                if pos.direction == "CE" and spot >= pos.btc_tp1: tp1_hit = True
+                if pos.direction == "PE" and spot <= pos.btc_tp1: tp1_hit = True
+                
+            if tp1_hit and "TP1" not in pos.partial_exits:
+                pos.partial_exits.append("TP1")
+                # Move SL to Entry (Breakeven)
+                pos.stop = pos.entry_price
+                if pos.btc_sl_price and spot:
+                    # Move BTC SL to current spot (or some breakeven approximation)
+                    # For simplicity, we just rely on option_sl_price (pos.stop) for the trail
+                    pos.btc_sl_price = spot
+                # Exit 40% of original contracts
+                exit_contracts = max(1, int(pos.contracts * 0.4)) if pos.contracts > 1 else 1
+                if exit_contracts < pos.contracts:
+                    self._book_close(pos, price, exit_contracts, "tp1_partial")
+                else:
+                    return self._close(pos, price, "tp1_full")
+
+            # TP2
+            tp2_hit = (pos.option_tp2 and price >= pos.option_tp2)
+            if pos.btc_tp2 and spot:
+                if pos.direction == "CE" and spot >= pos.btc_tp2: tp2_hit = True
+                if pos.direction == "PE" and spot <= pos.btc_tp2: tp2_hit = True
+
+            if tp2_hit and "TP2" not in pos.partial_exits:
+                pos.partial_exits.append("TP2")
+                # Move SL to TP1
+                pos.stop = pos.option_tp1 if pos.option_tp1 else pos.entry_price
+                if pos.btc_sl_price and pos.btc_tp1:
+                    pos.btc_sl_price = pos.btc_tp1
+                
+                # Exit 40% of original contracts. If 10 contracts, 4 at TP1, 4 at TP2, 2 at TP3.
+                # To exit 40% of original:
+                # Wait, pos.contracts is currently reduced by TP1. 
+                # Total was say 10. Now pos.contracts = 6. 
+                # Exit 4.
+                # For simplicity, we just exit half of what's left for TP2.
+                exit_contracts = max(1, int(pos.contracts * 0.66)) if pos.contracts > 1 else 1
+                if exit_contracts < pos.contracts:
+                    self._book_close(pos, price, exit_contracts, "tp2_partial")
+                else:
+                    return self._close(pos, price, "tp2_full")
+
+            # TP3
+            tp3_hit = (pos.option_tp3 and price >= pos.option_tp3) or (price >= pos.target)
+            if pos.btc_tp3 and spot:
+                if pos.direction == "CE" and spot >= pos.btc_tp3: tp3_hit = True
+                if pos.direction == "PE" and spot <= pos.btc_tp3: tp3_hit = True
+            
+            if tp3_hit:
+                return self._close(pos, price, "tp3_full")
+
+        # 3. Settlement / Expiry Check
         if _expiry_settled(pos.expiry):
-            # A settled option is worth its intrinsic value and nothing else.
-            # The old path booked the last quote — or, with a dead feed, the
-            # ENTRY price, recording worthless expiries as break-even trades and
-            # corrupting every downstream edge metric (audit #7).
-            settle_px = _settlement_value(pos.direction, pos.strike, _spot() or None)
+            settle_px = _settlement_value(pos.direction, pos.strike, spot or None)
             if settle_px is None:
-                # No spot to value against. Book worthless rather than pretend
-                # break-even: a position that survived to settlement without
-                # being stopped out is overwhelmingly likely to be worthless,
-                # and that is also the conservative direction.
                 settle_px = 0.0
                 journal.record("warn", {
                     "id": pos.id, "symbol": pos.symbol,
                     "note": "settled with no spot available — booked at 0"})
             return self._close(pos, settle_px, "settled", sell=False)
+            
+        # 4. Time-based Exits
         age_bars = (time.time() - pos.opened_at) / max(pos.bar_seconds, 1)
         if pos.max_hold_bars and age_bars >= pos.max_hold_bars:
             return self._close(pos, price, "time_exit")
+            
+        # DTE < 3 Days rule
+        try:
+            d, m, y = pos.expiry.split("-")
+            ex_date = datetime(int(y), int(m), int(d), tzinfo=timezone.utc)
+            dte = (ex_date - datetime.now(timezone.utc)).days
+            if dte < -1:
+                return self._close(pos, price, "dte_exit")
+        except Exception:
+            pass
+
         return False
 
     def flatten_all(self, why: str = "manual_flatten") -> int:

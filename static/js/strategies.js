@@ -138,6 +138,17 @@
         const up = p.unrealized_pnl;
         const cls = up > 0 ? "pos" : up < 0 ? "neg" : "";
         const age = p.age_sec ? Math.round(p.age_sec) + "s" : "—";
+        
+        let tp_str = fmt(p.target, 2);
+        if (p.option_tp1) {
+            tp_str = `${fmt(p.option_tp1, 2)} / ${fmt(p.option_tp2, 2)} / ${fmt(p.option_tp3, 2)}`;
+        }
+        
+        let sl_str = fmt(p.stop, 2);
+        if (p.btc_sl_price) {
+            sl_str += ` (BTC ${fmt(p.btc_sl_price, 0)})`;
+        }
+        
         return `<tr>
           <td>${p.strategy}</td>
           <td><span class="tag ${p.direction === "CE" ? "ce" : "pe"}">${p.direction}</span></td>
@@ -148,8 +159,8 @@
           <td>${p.leverage || 1}x</td>
           <td>${fmt(p.entry_price, 2)}</td>
           <td>${fmt(p.current_price, 2)}</td>
-          <td class="pos">${fmt(p.target, 2)}</td>
-          <td class="neg">${fmt(p.stop, 2)}</td>
+          <td class="pos" style="font-size:11px;">${tp_str}</td>
+          <td class="neg" style="font-size:11px;">${sl_str}</td>
           <td class="${cls}">${up === null || up === undefined ? "—" : money(up)}</td>
           <td style="color:var(--text-dim)">${age}</td>
         </tr>`;

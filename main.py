@@ -1393,6 +1393,8 @@ async def api_post_settings(request: Request):
 async def api_preview_confidence(symbol: str, side: str, confidence: int = 50):
     from strategy.executor import _confidence_params
     from strategy.pricebus import bus
+    from strategy.options_calc import calculate_options_order_params
+    
     contracts, leverage = _confidence_params(confidence)
     
     spot = bus.spot(symbol) or engine.last_spot or 0.0
@@ -1402,8 +1404,14 @@ async def api_preview_confidence(symbol: str, side: str, confidence: int = 50):
     if not quote:
         return JSONResponse(status_code=400, content={"error": "No tradable option found for current spot price."})
         
-    entry = quote.best_ask or quote.mark_price or 0.0
-    margin = (entry * contracts * quote.contract_value) / leverage if leverage else 0.0
+    virtual_balance = account_sync.snapshot().get("equity_usd", 10000.0)
+    
+    try:
+        adv_params = calculate_options_order_params(quote.symbol, side.upper(), confidence, virtual_balance)
+    except Exception as e:
+        return JSONResponse(status_code=400, content={"error": f"Failed to calculate advanced order params: {e}"})
+
+    margin = (adv_params["smart_entry"] * contracts * quote.contract_value) / leverage if leverage else 0.0
     
     conf = max(1, min(100, confidence))
     if conf <= 20: tier = "Very Low"
@@ -1414,13 +1422,14 @@ async def api_preview_confidence(symbol: str, side: str, confidence: int = 50):
     
     return {
         "symbol": quote.symbol,
-        "entry_price": entry,
+        "entry_price": adv_params["smart_entry"],
         "contracts": contracts,
         "leverage": leverage,
         "margin": margin,
         "tier": tier,
         "contract_value": quote.contract_value,
-        "available_usd": account_sync.snapshot().get("available_usd", 0)
+        "available_usd": account_sync.snapshot().get("available_usd", 0),
+        "adv_params": adv_params
     }
 
 @app.post("/api/order/place")
@@ -1432,6 +1441,7 @@ async def api_order_place(request: Request):
     
     def do_trade():
         from strategy.pricebus import bus
+        from strategy.base import Signal
         spot = bus.spot(symbol) or engine.last_spot or 0.0
         q_dict = engine.executor.resolver.atm(spot)
         quote = q_dict.get(side.upper())
@@ -1439,17 +1449,18 @@ async def api_order_place(request: Request):
         if not quote:
             return {"error": "Could not resolve ATM option for entry."}
             
-        from strategy.base import Signal
         sig = Signal(
             strategy="manual",
             direction=side.upper(),
-            reason=f"Manual trade at {confidence}% confidence",
-            confidence=confidence,
-            sl_pct=0.10,
-            rr=1.5
+            reason=f"Manual trade with {confidence} confidence",
+            confidence=confidence
         )
-        res = engine.executor.open(sig, quote, 60)
-        return {"ok": bool(res), "position": res}
+        
+        # Open market will do the pre-trade calculation again and execute
+        res = engine.executor.open(sig, quote, bar_seconds=60)
+        if not res:
+            return {"error": "Order rejected by executor (check journal for reasons)."}
+        return {"ok": True, "position": res}
         
     try:
         res = await asyncio.to_thread(do_trade)

@@ -219,6 +219,10 @@ class DeltaClient:
     def ticker(self, symbol: str, base: Optional[str] = None) -> dict:
         return self._public_get(base or config.EXEC_BASE, f"/v2/tickers/{symbol}") or {}
 
+    def l2orderbook(self, symbol: str, base: Optional[str] = None) -> dict:
+        """Fetch L2 orderbook for a symbol (level 2 depth)."""
+        return self._public_get(base or config.EXEC_BASE, f"/v2/l2orderbook/{symbol}") or {}
+
     # ------------------------------------------------------------------ #
     # Authenticated (Disabled for Paper Trading)
     # ------------------------------------------------------------------ #
