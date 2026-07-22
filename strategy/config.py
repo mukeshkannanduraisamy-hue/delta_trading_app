@@ -166,3 +166,6 @@ def summary() -> dict:
         "entry_order_type": ENTRY_ORDER_TYPE,
         "limit_anchor": LIMIT_ANCHOR,
     }
+
+IV_SKIP_THRESHOLD = 85
+

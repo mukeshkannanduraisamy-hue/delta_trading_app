@@ -19,7 +19,7 @@ from .delta_client import DeltaError, DeltaNetworkError, client
 from .journal import journal
 from .market_data import OptionQuote, OptionResolver
 from .pricebus import bus
-from .options_calc import calculate_options_order_params
+from .options_calc import calculate_options_order_params, AutoSkipTrade
 
 def _confidence_params(confidence: int) -> tuple[int, int]:
     from .settings import manager
@@ -395,6 +395,10 @@ class Executor:
         # ADVANCED OPTIONS PRE-TRADE CALCULATION
         try:
             adv_params = calculate_options_order_params(quote.symbol, signal.direction, signal.confidence, virtual_balance)
+        except AutoSkipTrade as e:
+            journal.record("skip", {"strategy": signal.strategy, "direction": signal.direction,
+                                    "reason": str(e), "symbol": quote.symbol})
+            return None
         except Exception as e:
             journal.record("skip", {"strategy": signal.strategy, "direction": signal.direction,
                                     "reason": f"calculation failed: {e}", "symbol": quote.symbol})
@@ -443,6 +447,10 @@ class Executor:
         # ADVANCED OPTIONS PRE-TRADE CALCULATION
         try:
             adv_params = calculate_options_order_params(quote.symbol, signal.direction, signal.confidence, virtual_balance)
+        except AutoSkipTrade as e:
+            journal.record("skip", {"strategy": signal.strategy, "direction": signal.direction,
+                                    "reason": str(e), "symbol": quote.symbol})
+            return None
         except Exception as e:
             journal.record("skip", {"strategy": signal.strategy, "direction": signal.direction,
                                     "reason": f"calculation failed: {e}", "symbol": quote.symbol})
@@ -559,19 +567,82 @@ class Executor:
     # ------------------------------------------------------------------ #
     def manage(self) -> list[dict]:
         with self._lock:
+            import time
+            from .journal import journal
             self.resolve_pending()
+            
+            now = time.time()
+            if not hasattr(self, 'last_sl_tp_check'): self.last_sl_tp_check = 0
+            if not hasattr(self, 'last_theta_check'): self.last_theta_check = 0
+            if not hasattr(self, 'last_greeks_refresh'): self.last_greeks_refresh = 0
+            
+            do_sl_tp = (now - self.last_sl_tp_check) >= 30
+            do_theta = (now - self.last_theta_check) >= 900
+            do_greeks = (now - self.last_greeks_refresh) >= 300
+            
+            if do_sl_tp: self.last_sl_tp_check = now
+            if do_theta: self.last_theta_check = now
+            if do_greeks: self.last_greeks_refresh = now
+
             snapshots: list[dict] = []
+            
+            if do_greeks:
+                self._refresh_greeks()
+                
+            if do_theta:
+                self._check_theta_erosion()
+                
+            if do_sl_tp:
+                self._check_sl_tp()
+                
             for pos in list(self.positions.values()):
-                try:
-                    if not self._manage_one(pos):
-                        snapshots.append(pos.as_dict())
-                except Exception as exc:  # noqa: BLE001 — isolate this position
-                    journal.record("error", {"scope": f"manage:{pos.symbol}", "error": repr(exc)})
-                    snapshots.append(pos.as_dict())
+                snapshots.append(pos.as_dict())
+                
             snapshots.extend(pe.as_dict() for pe in self.pending.values())
-            # Publish for the lock-free async readers (see snapshots()).
             self._snapshot_cache = snapshots
             return snapshots
+
+    def _refresh_greeks(self):
+        for pos in list(self.positions.values()):
+            try:
+                ticker = self.resolver.client.ticker(pos.symbol)
+                if ticker and "greeks" in ticker:
+                    daily_theta = abs(float(ticker["greeks"].get("theta", 0)))
+                    pos.meta["daily_theta"] = daily_theta
+            except Exception:
+                pass
+                
+    def _check_theta_erosion(self):
+        from .journal import journal
+        for pos in list(self.positions.values()):
+            try:
+                price = self.resolver.live_price(pos.symbol)
+            except Exception:
+                price = None
+                
+            if price is None:
+                continue
+                
+            daily_theta = pos.meta.get("daily_theta")
+            if not daily_theta:
+                daily_theta = pos.meta.get("adv_params", {}).get("daily_theta")
+                
+            if daily_theta and price > 0:
+                erosion = (daily_theta / price) * 100
+                if erosion > 15:
+                    journal.record("warn", {"id": pos.id, "symbol": pos.symbol, "warning": "Position auto-closed due to extreme theta decay"})
+                    self._close(pos, price, "theta_erosion_exceeded")
+                elif erosion > 8:
+                    journal.record("warn", {"id": pos.id, "symbol": pos.symbol, "warning": f"URGENT: Theta is eroding {erosion:.1f}% of remaining premium per day. Recommend closing position."})
+
+    def _check_sl_tp(self):
+        from .journal import journal
+        for pos in list(self.positions.values()):
+            try:
+                if not self._manage_one(pos):
+                    pass
+            except Exception as exc:
+                journal.record("error", {"scope": f"manage:{pos.symbol}", "error": repr(exc)})
 
     def _manage_one(self, pos: Position) -> bool:
         price: Optional[float] = None

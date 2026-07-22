@@ -85,6 +85,15 @@
   .warn-note { font-size: 12px; color: var(--warning); background: rgba(210,153,34,.1);
     border:1px solid rgba(210,153,34,.3); border-radius:6px; padding:10px 12px; }
 
+  /* Decision Log CSS */
+  .dec-log { background: var(--card-bg-2); border: 1px solid var(--border); border-radius: 6px; padding: 10px; margin-bottom: 10px; font-family: monospace; font-size: 11px; color: var(--text-dim); line-height: 1.4; }
+  .dec-log.executing { border-left: 3px solid var(--success); }
+  .dec-log.skipped { border-left: 3px solid var(--warning); }
+  .dec-header { font-weight: bold; color: var(--text); font-size: 12px; margin-bottom: 5px; }
+  .dec-status { margin-top: 5px; font-weight: bold; }
+  .dec-status.executing { color: var(--success); }
+  .dec-status.skipped { color: var(--warning); }
+
   /* Modal & Form */
   .modal-overlay { position:fixed; inset:0; background:rgba(0,0,0,0.5); display:none; justify-content:center; align-items:center; z-index:999; }
   .modal { background:var(--card-bg); border:1px solid var(--border); border-radius:var(--radius); padding:20px; width:500px; max-width:90vw; max-height:90vh; overflow-y:auto; }
@@ -156,6 +165,387 @@
         <th>Entry</th><th>Now</th><th>Target</th><th>Stop</th><th>uPnL</th><th>Age</th>
       </tr></thead><tbody id="pos-body"><tr><td colspan="10" class="empty">No open positions.</td></tr></tbody></table>
     </div>
+  </div>
+
+  <!--  Daily Decision Summary Counter Panel -->
+  <div id="decision-summary-panel" 
+       style="
+         background: #1a1a2e;
+         border: 1px solid #2d2d4e;
+         border-radius: 8px;
+         padding: 16px;
+         margin-bottom: 12px;
+         font-family: monospace;
+       ">
+
+    <!-- Panel Header Row -->
+    <div style="
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 12px;
+      border-bottom: 1px solid #2d2d4e;
+      padding-bottom: 8px;
+    ">
+      <span style="
+        color: #a0a0c0;
+        font-size: 11px;
+        font-weight: bold;
+        letter-spacing: 1px;
+        text-transform: uppercase;
+      ">
+        Today's Decision Summary
+      </span>
+      <span id="summary-last-updated" 
+            style="color: #505070; font-size: 10px;">
+        Waiting for signals...
+      </span>
+    </div>
+
+    <!-- Counter Grid -->
+    <div style="
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 10px;
+    ">
+
+      <!-- Counter 1: Signals Scanned -->
+      <div style="
+        background: #12122a;
+        border: 1px solid #2d2d4e;
+        border-radius: 6px;
+        padding: 10px;
+        text-align: center;
+      ">
+        <div id="count-scanned" 
+             style="
+               font-size: 28px;
+               font-weight: bold;
+               color: #a0a0ff;
+               line-height: 1;
+             ">
+          0
+        </div>
+        <div style="
+          color: #606080;
+          font-size: 10px;
+          margin-top: 4px;
+          text-transform: uppercase;
+          letter-spacing: 0.5px;
+        ">
+          Signals Scanned
+        </div>
+      </div>
+
+      <!-- Counter 2: Executed -->
+      <div style="
+        background: #12122a;
+        border: 1px solid #1a3a1a;
+        border-radius: 6px;
+        padding: 10px;
+        text-align: center;
+      ">
+        <div id="count-executed" 
+             style="
+               font-size: 28px;
+               font-weight: bold;
+               color: #00cc66;
+               line-height: 1;
+             ">
+          0
+        </div>
+        <div style="
+          color: #606080;
+          font-size: 10px;
+          margin-top: 4px;
+          text-transform: uppercase;
+          letter-spacing: 0.5px;
+        ">
+          Executed
+        </div>
+        <div id="pct-executed" 
+             style="
+               color: #00cc66;
+               font-size: 10px;
+               margin-top: 2px;
+             ">
+          0%
+        </div>
+      </div>
+
+      <!-- Counter 3: Total Skipped -->
+      <div style="
+        background: #12122a;
+        border: 1px solid #3a2a1a;
+        border-radius: 6px;
+        padding: 10px;
+        text-align: center;
+      ">
+        <div id="count-skipped-total" 
+             style="
+               font-size: 28px;
+               font-weight: bold;
+               color: #ff9900;
+               line-height: 1;
+             ">
+          0
+        </div>
+        <div style="
+          color: #606080;
+          font-size: 10px;
+          margin-top: 4px;
+          text-transform: uppercase;
+          letter-spacing: 0.5px;
+        ">
+          Total Skipped
+        </div>
+        <div id="pct-skipped" 
+             style="
+               color: #ff9900;
+               font-size: 10px;
+               margin-top: 2px;
+             ">
+          0%
+        </div>
+      </div>
+
+      <!-- Counter 4: Skipped - High IV -->
+      <div style="
+        background: #12122a;
+        border: 1px solid #3a1a1a;
+        border-radius: 6px;
+        padding: 10px;
+        text-align: center;
+      ">
+        <div id="count-skip-iv" 
+             style="
+               font-size: 28px;
+               font-weight: bold;
+               color: #ff4444;
+               line-height: 1;
+             ">
+          0
+        </div>
+        <div style="
+          color: #606080;
+          font-size: 10px;
+          margin-top: 4px;
+          text-transform: uppercase;
+          letter-spacing: 0.5px;
+        ">
+          Skipped - High IV
+        </div>
+        <div id="pct-skip-iv" 
+             style="
+               color: #ff4444;
+               font-size: 10px;
+               margin-top: 2px;
+             ">
+          0%
+        </div>
+      </div>
+
+      <!-- Counter 5: Skipped - Low DTE -->
+      <div style="
+        background: #12122a;
+        border: 1px solid #3a1a3a;
+        border-radius: 6px;
+        padding: 10px;
+        text-align: center;
+      ">
+        <div id="count-skip-dte" 
+             style="
+               font-size: 28px;
+               font-weight: bold;
+               color: #cc44ff;
+               line-height: 1;
+             ">
+          0
+        </div>
+        <div style="
+          color: #606080;
+          font-size: 10px;
+          margin-top: 4px;
+          text-transform: uppercase;
+          letter-spacing: 0.5px;
+        ">
+          Skipped - Low DTE
+        </div>
+        <div id="pct-skip-dte" 
+             style="
+               color: #cc44ff;
+               font-size: 10px;
+               margin-top: 2px;
+             ">
+          0%
+        </div>
+      </div>
+
+      <!-- Counter 6: Skipped - Low Confidence -->
+      <div style="
+        background: #12122a;
+        border: 1px solid #2a2a1a;
+        border-radius: 6px;
+        padding: 10px;
+        text-align: center;
+      ">
+        <div id="count-skip-conf" 
+             style="
+               font-size: 28px;
+               font-weight: bold;
+               color: #cccc00;
+               line-height: 1;
+             ">
+          0
+        </div>
+        <div style="
+          color: #606080;
+          font-size: 10px;
+          margin-top: 4px;
+          text-transform: uppercase;
+          letter-spacing: 0.5px;
+        ">
+          Skipped - Low Conf
+        </div>
+        <div id="pct-skip-conf" 
+             style="
+               color: #cccc00;
+               font-size: 10px;
+               margin-top: 2px;
+             ">
+          0%
+        </div>
+      </div>
+
+      <!-- Counter 7: Auto-Closed Theta -->
+      <div style="
+        background: #12122a;
+        border: 1px solid #1a3a3a;
+        border-radius: 6px;
+        padding: 10px;
+        text-align: center;
+      ">
+        <div id="count-autoclosed-theta" 
+             style="
+               font-size: 28px;
+               font-weight: bold;
+               color: #00cccc;
+               line-height: 1;
+             ">
+          0
+        </div>
+        <div style="
+          color: #606080;
+          font-size: 10px;
+          margin-top: 4px;
+          text-transform: uppercase;
+          letter-spacing: 0.5px;
+        ">
+          Auto-Closed Theta
+        </div>
+      </div>
+
+      <!-- Counter 8: Auto-Closed SL -->
+      <div style="
+        background: #12122a;
+        border: 1px solid #3a1a1a;
+        border-radius: 6px;
+        padding: 10px;
+        text-align: center;
+      ">
+        <div id="count-autoclosed-sl" 
+             style="
+               font-size: 28px;
+               font-weight: bold;
+               color: #ff6666;
+               line-height: 1;
+             ">
+          0
+        </div>
+        <div style="
+          color: #606080;
+          font-size: 10px;
+          margin-top: 4px;
+          text-transform: uppercase;
+          letter-spacing: 0.5px;
+        ">
+          Closed - SL Hit
+        </div>
+      </div>
+
+      <!-- Counter 9: TP Hit -->
+      <div style="
+        background: #12122a;
+        border: 1px solid #1a3a1a;
+        border-radius: 6px;
+        padding: 10px;
+        text-align: center;
+      ">
+        <div id="count-tp-hit" 
+             style="
+               font-size: 28px;
+               font-weight: bold;
+               color: #00ff88;
+               line-height: 1;
+             ">
+          0
+        </div>
+        <div style="
+          color: #606080;
+          font-size: 10px;
+          margin-top: 4px;
+          text-transform: uppercase;
+          letter-spacing: 0.5px;
+        ">
+          TP Hit
+        </div>
+      </div>
+
+    </div>
+    <!-- End Counter Grid -->
+
+    <!-- Reset Button Row -->
+    <div style="
+      margin-top: 12px;
+      padding-top: 8px;
+      border-top: 1px solid #2d2d4e;
+      display: flex;
+      justify-content: flex-end;
+      align-items: center;
+      gap: 10px;
+    ">
+      <span id="summary-session-start" 
+            style="color: #404060; font-size: 10px;">
+        Session started: --
+      </span>
+      <button 
+        onclick="resetDecisionCounters()"
+        style="
+          background: #2d2d4e;
+          border: 1px solid #404070;
+          border-radius: 4px;
+          color: #8080a0;
+          font-size: 10px;
+          padding: 4px 10px;
+          cursor: pointer;
+          font-family: monospace;
+          text-transform: uppercase;
+          letter-spacing: 0.5px;
+        "
+        onmouseover="this.style.background='#3d3d6e'"
+        onmouseout="this.style.background='#2d2d4e'"
+      >
+        Reset Counters
+      </button>
+    </div>
+
+  </div>
+  <!-- End Daily Decision Summary Panel -->
+
+  <!-- Decision Log -->
+  <div class="panel">
+    <h3>Real-time Decision Log <span style="margin-left:auto;font-size:11px;color:var(--text-dim);text-transform:none;letter-spacing:0">Automated execution trace</span></h3>
+    <div class="body feed" id="decision-feed"><div class="empty">No automated decisions yet.</div></div>
   </div>
 
   <!-- Journal feed -->

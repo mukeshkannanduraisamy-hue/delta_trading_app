@@ -14,6 +14,139 @@
 
   let strategiesRendered = false;
   let feedCache = [];
+  let decisionCache = [];
+
+// ── Decision Summary Counters ──────────────────────
+const decisionCounters = {
+  scanned:        0,
+  executed:       0,
+  skipHighIV:     0,
+  skipLowDTE:     0,
+  skipLowConf:    0,
+  autoClosedTheta:0,
+  autoClosedSL:   0,
+  tpHit:          0,
+  sessionStart:   null
+};
+// ──────────────────────────────────────────────────
+
+function updateDecisionCounters() {
+  const total = decisionCounters.scanned;
+
+  // Update all counter display values
+  const eScan = document.getElementById('count-scanned');
+  if (eScan) eScan.textContent = decisionCounters.scanned;
+
+  const eExec = document.getElementById('count-executed');
+  if (eExec) eExec.textContent = decisionCounters.executed;
+
+  const eSkipTotal = document.getElementById('count-skipped-total');
+  if (eSkipTotal) eSkipTotal.textContent = decisionCounters.skipHighIV + decisionCounters.skipLowDTE + decisionCounters.skipLowConf;
+
+  const eSkipIV = document.getElementById('count-skip-iv');
+  if (eSkipIV) eSkipIV.textContent = decisionCounters.skipHighIV;
+
+  const eSkipDTE = document.getElementById('count-skip-dte');
+  if (eSkipDTE) eSkipDTE.textContent = decisionCounters.skipLowDTE;
+
+  const eSkipConf = document.getElementById('count-skip-conf');
+  if (eSkipConf) eSkipConf.textContent = decisionCounters.skipLowConf;
+
+  const eAutoTheta = document.getElementById('count-autoclosed-theta');
+  if (eAutoTheta) eAutoTheta.textContent = decisionCounters.autoClosedTheta;
+
+  const eAutoSL = document.getElementById('count-autoclosed-sl');
+  if (eAutoSL) eAutoSL.textContent = decisionCounters.autoClosedSL;
+
+  const eTPHit = document.getElementById('count-tp-hit');
+  if (eTPHit) eTPHit.textContent = decisionCounters.tpHit;
+
+  // Calculate and update percentages
+  if (total > 0) {
+    const pctExec = Math.round((decisionCounters.executed / total) * 100);
+    const totalSkipped = decisionCounters.skipHighIV + decisionCounters.skipLowDTE + decisionCounters.skipLowConf;
+    const pctSkipped = Math.round((totalSkipped / total) * 100);
+    const pctIV = Math.round((decisionCounters.skipHighIV / total) * 100);
+    const pctDTE = Math.round((decisionCounters.skipLowDTE / total) * 100);
+    const pctConf = Math.round((decisionCounters.skipLowConf / total) * 100);
+
+    const ePctExec = document.getElementById('pct-executed');
+    if (ePctExec) ePctExec.textContent = pctExec + '%';
+
+    const ePctSkip = document.getElementById('pct-skipped');
+    if (ePctSkip) ePctSkip.textContent = pctSkipped + '%';
+
+    const ePctIV = document.getElementById('pct-skip-iv');
+    if (ePctIV) ePctIV.textContent = pctIV + '%';
+
+    const ePctDTE = document.getElementById('pct-skip-dte');
+    if (ePctDTE) ePctDTE.textContent = pctDTE + '%';
+
+    const ePctConf = document.getElementById('pct-skip-conf');
+    if (ePctConf) ePctConf.textContent = pctConf + '%';
+  }
+
+  // Update last updated timestamp
+  const now = new Date();
+  const eLastUp = document.getElementById('summary-last-updated');
+  if (eLastUp) {
+    eLastUp.textContent = 'Updated: ' + 
+      now.toLocaleTimeString('en-IN', {
+        hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false
+      });
+  }
+}
+
+function resetDecisionCounters() {
+  decisionCounters.scanned         = 0;
+  decisionCounters.executed        = 0;
+  decisionCounters.skipHighIV      = 0;
+  decisionCounters.skipLowDTE      = 0;
+  decisionCounters.skipLowConf     = 0;
+  decisionCounters.autoClosedTheta = 0;
+  decisionCounters.autoClosedSL    = 0;
+  decisionCounters.tpHit           = 0;
+  decisionCounters.sessionStart    = new Date();
+
+  const eSessionStart = document.getElementById('summary-session-start');
+  if (eSessionStart) {
+    eSessionStart.textContent = 'Session started: ' +
+      decisionCounters.sessionStart.toLocaleTimeString('en-IN', {
+        hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false
+      });
+  }
+
+  const eLastUp = document.getElementById('summary-last-updated');
+  if (eLastUp) eLastUp.textContent = 'Counters reset';
+
+  updateDecisionCounters();
+}
+
+function scheduleMidnightReset() {
+  const now = new Date();
+  const midnight = new Date();
+  midnight.setHours(24, 0, 0, 0);
+
+  const msUntilMidnight = midnight - now;
+
+  setTimeout(function() {
+    resetDecisionCounters();
+    const logContainer = document.getElementById('decision-feed');
+    if (logContainer) {
+      const resetEntry = document.createElement('div');
+      resetEntry.style.cssText = `
+        color: #404060; font-size: 10px; padding: 4px 0; border-top: 1px solid #2d2d4e; text-align: center;
+      `;
+      resetEntry.textContent = '── Daily counters auto-reset at midnight ──';
+      logContainer.prepend(resetEntry);
+    }
+    scheduleMidnightReset();
+  }, msUntilMidnight);
+}
+
+// Ensure reset on load
+window.resetDecisionCounters = resetDecisionCounters;
+
 
   // Most recent /api/strategy/status payload, used by the Start confirmation.
   let lastStatus = null;
@@ -168,6 +301,41 @@
       .join("");
   }
 
+  function renderDecisionFeed(events) {
+    const feed = $("decision-feed");
+    if (!feed) return;
+    if (!events || !events.length) {
+      feed.innerHTML = `<div class="empty">No automated decisions yet.</div>`;
+      return;
+    }
+    feed.innerHTML = events
+      .map((e) => {
+        const t = new Date((e.ts || 0) * 1000).toLocaleTimeString("en-GB");
+        let html = `<div class="dec-log ${e.kind === 'options_pre_trade' ? 'executing' : 'skipped'}">`;
+        html += `<div class="dec-header">[${t}] ${e.kind === 'options_pre_trade' ? 'ORDER CALCULATION' : 'SKIPPED: ' + (e.reason || 'Unknown')}</div>`;
+        
+        let p = null;
+        if (e.kind === 'options_pre_trade') {
+            p = e; 
+            if (e.adv_params) p = e.adv_params; 
+        } else if (e.adv_params) {
+            p = e.adv_params;
+        }
+
+        if (p && p.sl_atr !== undefined) {
+           html += `<div>ATR: 15M=$${fmt(p.atr_15m, 0)} | 1H=$${fmt(p.atr_1h, 0)} | SL_ATR=$${fmt(p.sl_atr, 0)}</div>`;
+           html += `<div>DTE: ${p.dte} days | Theta Mult: ${fmt(p.theta_days_multiplier, 1)}x | Buffer: $${fmt(p.theta_buffer, 0)}</div>`;
+           html += `<div>IVR: ${fmt(p.ivr, 1)}% | IV Buffer: ${fmt(p.iv_buffer_pct, 1)}% | $${fmt(p.iv_buffer, 0)}</div>`;
+           html += `<div>Gamma: ${fmt(p.gamma, 4)} | Factor: ${fmt(p.gamma_risk_factor, 1)}x</div>`;
+           html += `<div>Final SL: $${fmt(p.final_sl, 2)} | TP1: ${p.final_tp1 ? '$'+fmt(p.final_tp1, 2) : 'N/A'} | TP2: ${p.final_tp2 ? '$'+fmt(p.final_tp2, 2) : 'N/A'}</div>`;
+           html += `<div class="dec-status ${e.kind === 'options_pre_trade' ? 'executing' : 'skipped'}">STATUS: ${e.kind === 'options_pre_trade' ? 'EXECUTING' : 'SKIPPED'}</div>`;
+        }
+        html += `</div>`;
+        return html;
+      })
+      .join("");
+  }
+
   function describeEvent(e) {
     switch (e.kind) {
       case "open":
@@ -271,9 +439,12 @@
     // Seed the feed once; subsequent events arrive by WebSocket push.
     if (!feedCache.length) {
       try {
-        const j = await (await fetch("/api/strategy/journal?limit=60")).json();
+        const j = await (await fetch("/api/strategy/journal?limit=200")).json();
         feedCache = j.events || [];
         renderFeed(feedCache);
+        
+        decisionCache = feedCache.filter(e => e.kind === 'options_pre_trade' || (e.kind === 'skip' && e.reason && e.reason.includes('AUTO-SKIPPED'))).slice(0, 10);
+        renderDecisionFeed(decisionCache);
       } catch {}
     }
   }
@@ -376,6 +547,57 @@
     const list = Array.isArray(events) ? events : [events];
     feedCache = [...list].reverse().concat(feedCache).slice(0, 60);
     renderFeed(feedCache);
+    
+    list.forEach(data => {
+      const eventType = data.kind;
+      
+      // Every options_pre_trade event = 1 signal scanned
+      if (eventType === 'options_pre_trade') {
+        decisionCounters.scanned++;
+        // If an option pre trade arrives, the position is executing
+        decisionCounters.executed++;
+      }
+      
+      // Skip events
+      if (eventType === 'skip') {
+        decisionCounters.scanned++;
+        const reason = (data.reason || '').toLowerCase();
+        if (reason.includes('iv') || reason.includes('implied volatility') || reason.includes('ivr')) {
+          decisionCounters.skipHighIV++;
+        }
+        else if (reason.includes('dte') || reason.includes('expiry') || reason.includes('days to expiry')) {
+          decisionCounters.skipLowDTE++;
+        }
+        else if (reason.includes('confidence') || reason.includes('conf')) {
+          decisionCounters.skipLowConf++;
+        }
+        else {
+          decisionCounters.skipLowConf++;
+        }
+      }
+      
+      // Auto-close events
+      if (eventType === 'close' || eventType === 'close_partial') {
+        const closeReason = (data.why || '').toLowerCase();
+        if (closeReason.includes('theta') || closeReason.includes('erosion')) {
+          decisionCounters.autoClosedTheta++;
+        }
+        else if (closeReason.includes('sl') || closeReason.includes('stop_premium') || closeReason.includes('stop_btc')) {
+          decisionCounters.autoClosedSL++;
+        }
+        else if (closeReason.includes('tp') || closeReason.includes('take_profit')) {
+          decisionCounters.tpHit++;
+        }
+      }
+    });
+    
+    updateDecisionCounters();
+
+    const decs = list.filter(e => e.kind === 'options_pre_trade' || (e.kind === 'skip' && e.reason && e.reason.includes('AUTO-SKIPPED')));
+    if (decs.length) {
+       decisionCache = [...decs].reverse().concat(decisionCache).slice(0, 10);
+       renderDecisionFeed(decisionCache);
+    }
   });
 
   AppWS.onStatus((s) => {
@@ -438,5 +660,17 @@
   });
 
   // One initial REST call to populate config/strategy cards, then push-driven.
+
+  // Initialize session start time
+  decisionCounters.sessionStart = new Date();
+  const eSessionStart = document.getElementById('summary-session-start');
+  if (eSessionStart) {
+    eSessionStart.textContent = 'Session started: ' +
+      decisionCounters.sessionStart.toLocaleTimeString('en-IN', {
+        hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false
+      });
+  }
+  scheduleMidnightReset();
   refresh();
+
 })();
