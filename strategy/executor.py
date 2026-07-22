@@ -1,26 +1,6 @@
-"""Order execution + open-position management.
+"""Order execution + open-position management (PAPER TRADING).
 
-LIVE ONLY. Paper (simulated-fill) mode was removed on 2026-07-21 — every entry
-and every exit in this module sends a real order to the Delta testnet demo book.
-There is no dry run and no simulated fallback.
-
-ENTRY_ORDER_TYPE selects how entries are placed:
-  * market — cross the spread, always fills, pays the ask.
-  * limit  — rest a GTC limit near mid; avoids paying the spread but may not
-             fill. Unfilled orders auto-cancel after LIMIT_TTL_BARS.
-
-Because there is no simulated path, the engine refuses to start without working
-credentials (see Engine.preflight) rather than degrading into a state where it
-fires signals and fails every order while appearing to trade.
-
-Hardening invariants (each guards a real failure mode found in review):
-  * Every fill is verified (state / unfilled_size); a cancelled or unfilled
-    order never becomes a tracked position; partial fills track only what filled.
-  * A network-ambiguous order (timeout) is never blindly retried: the exchange
-    position is reconciled before any sell, so the engine can't double-sell.
-  * A failed exit keeps the position tracked and retries — never orphaned.
-  * open/manage/flatten/resolve_pending share one lock (no API-vs-engine races).
-  * Time and expiry exits fire even with no live quote (no immortal positions).
+Simulates all trades internally.
 """
 
 from __future__ import annotations
@@ -32,12 +12,31 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Optional
 
+import math
 from . import config, store
 from .base import Signal
 from .delta_client import DeltaError, DeltaNetworkError, client
 from .journal import journal
 from .market_data import OptionQuote, OptionResolver
 from .pricebus import bus
+
+def _confidence_params(confidence: int) -> tuple[int, int]:
+    from .settings import manager
+    conf = max(1, min(100, confidence))
+    if conf <= 20:
+        pct, lev = manager.get("lot_pct_very_low"), manager.get("leverage_very_low")
+    elif conf <= 40:
+        pct, lev = manager.get("lot_pct_low"), manager.get("leverage_low")
+    elif conf <= 60:
+        pct, lev = manager.get("lot_pct_medium"), manager.get("leverage_medium")
+    elif conf <= 80:
+        pct, lev = manager.get("lot_pct_high"), manager.get("leverage_high")
+    else:
+        pct, lev = manager.get("lot_pct_very_high"), manager.get("leverage_very_high")
+    lev = min(lev, manager.get("max_leverage_cap"))
+    raw_lots = (pct / 100.0) * manager.get("max_lot_size")
+    return max(1, math.floor(raw_lots)), lev
+
 
 
 def _spot() -> float:
@@ -162,6 +161,8 @@ class Position:
     entry_fee: float = 0.0
     last_price: Optional[float] = None
     exit_ambiguous: bool = False
+    confidence: int = 50
+    leverage: int = 1
     meta: dict = field(default_factory=dict)
 
     def as_dict(self, current_price: Optional[float] = None) -> dict:
@@ -179,6 +180,8 @@ class Position:
             # Needed to match this position against the exchange's book.
             "product_id": self.product_id,
             "adopted": bool(self.meta.get("adopted")),
+            "confidence": self.confidence,
+            "leverage": self.leverage,
         }
 
 
@@ -206,6 +209,7 @@ class PendingEntry:
             "unrealized_pnl": None, "reason": f"resting limit @ {self.limit_price}",
             "opened_at": self.placed_at, "age_sec": time.time() - self.placed_at,
             "mode": config.EXECUTION_MODE, "state": "pending",
+            "confidence": self.signal.confidence, "leverage": 1,
         }
 
 
@@ -278,54 +282,16 @@ class Executor:
 
     # ------------------------------------------------------------------ #
     def _exchange_size(self, product_id: int) -> Optional[int]:
-        """Authoritative open size for ONE product.
-
-        Uses the real-time /v2/positions?product_id= form. The bulk
-        /v2/positions/margined endpoint lags up to 10 seconds, and this value
-        decides whether an ambiguous exit gets re-sent — a stale "still open"
-        reading there caused a second sell (audit #1).
-
-        Returns None if the size cannot be determined. Callers MUST NOT treat
-        None as flat.
-        """
-        try:
-            rows = client.positions(product_id=product_id)
-        except DeltaError:
-            return None
-        total = 0
-        for p in rows or []:
-            pid = p.get("product_id") or (p.get("product") or {}).get("id")
-            if pid and int(pid) == int(product_id):
-                try:
-                    total += int(float(p.get("size") or 0))
-                except (TypeError, ValueError):
-                    pass
-        return total
+        # Simulated mode ignores exchange
+        return None
 
     def _recover_by_coid(self, coid: str, attempts: int = 3) -> Optional[dict]:
-        """Resolve an ambiguous submission using our idempotency key.
-
-        Returns the order object if the exchange has it (it landed), or None if
-        it provably never existed / stayed unreachable. This is what turns a
-        timed-out entry from "silently dropped, position untracked" into a
-        recoverable event.
-        """
-        for i in range(attempts):
-            time.sleep(0.5 * (i + 1))   # let the exchange settle before asking
-            try:
-                o = client.get_order_by_coid(coid)
-            except DeltaNetworkError:
-                continue                 # still ambiguous — try again
-            except DeltaError:
-                return None              # 404: the order never landed
-            if o:
-                return o
         return None
 
     # ------------------------------------------------------------------ #
     def _register_position(self, strategy: str, direction: str, quote: OptionQuote,
                            signal: Signal, entry: float, contracts: int,
-                           bar_seconds: int, order_id=None) -> dict:
+                           bar_seconds: int, leverage: int = 1, order_id=None) -> dict:
         # Fee notional is 0.03% of UNDERLYING notional — pass live spot, not the
         # strike (audit #14).
         fee = _fees_or_cap(entry, quote.contract_value, contracts, spot=_spot())
@@ -338,6 +304,7 @@ class Executor:
             mode=config.EXECUTION_MODE, reason=signal.reason, opened_at=time.time(),
             max_hold_bars=signal.max_hold_bars or config.DEFAULT_MAX_HOLD_BARS,
             bar_seconds=bar_seconds, entry_fee=fee, last_price=entry,
+            confidence=signal.confidence, leverage=leverage,
             meta={**signal.meta, "order_id": order_id},
         )
         self.positions[pos.id] = pos
@@ -348,6 +315,7 @@ class Executor:
             "symbol": pos.symbol, "strike": pos.strike, "entry_price": entry,
             "target": pos.target, "stop": pos.stop, "contracts": contracts,
             "reason": pos.reason, "mode": pos.mode, "order_id": order_id,
+            "confidence": pos.confidence, "leverage": pos.leverage,
         })
         return pos.as_dict(entry)
 
@@ -357,7 +325,8 @@ class Executor:
             return self._open_locked(signal, quote, bar_seconds)
 
     def _open_locked(self, signal: Signal, quote: OptionQuote, bar_seconds: int) -> Optional[dict]:
-        if self.open_count() >= config.MAX_OPEN_POSITIONS:
+        from .settings import manager
+        if self.open_count() >= manager.get("max_open_positions"):
             return None
         if self.has_open(signal.strategy, signal.direction):
             return None
@@ -376,58 +345,35 @@ class Executor:
 
     # -- market entry (real order) --------------------------------------- #
     def _open_market(self, signal: Signal, quote: OptionQuote, bar_seconds: int) -> Optional[dict]:
-        # Reference price only — the tracked entry is overwritten by the
-        # exchange's average_fill_price below. It exists so a quote-less
-        # contract is rejected before an order is sent.
         entry = quote.best_ask or quote.mark_price
         if not entry or entry <= 0:
             journal.record("skip", {"strategy": signal.strategy, "direction": signal.direction,
                                     "reason": "no tradable premium", "symbol": quote.symbol})
             return None
-        coid = _coid(signal.direction)
-        try:
-            res = client.place_order(
-                quote.product_id, config.CONTRACTS, "buy", "market_order",
-                client_order_id=coid,
-            )
-        except DeltaNetworkError as exc:
-            # Outcome UNKNOWN — the exchange may have filled this. Dropping
-            # it here is what created untracked, stop-less positions
-            # (audit #4). Ask the exchange using our idempotency key.
-            res = self._recover_by_coid(coid)
-            if res is None:
-                journal.record("order_error", {
-                    "strategy": signal.strategy, "symbol": quote.symbol,
-                    "client_order_id": coid,
-                    "error": f"entry ambiguous AND unrecoverable: {exc}",
-                    "action": "MANUAL CHECK REQUIRED — possible untracked position"})
-                return None
-            journal.record("order_recovered", {
-                "strategy": signal.strategy, "symbol": quote.symbol,
-                "client_order_id": coid, "order_id": res.get("id")})
-        except DeltaError as exc:
-            journal.record("order_error", {"strategy": signal.strategy, "symbol": quote.symbol,
-                                           "error": str(exc)})
+        
+        # Check daily loss limit
+        from .settings import manager
+        loss_limit_pct = manager.get("daily_loss_limit_pct") / 100.0
+        start_balance = manager.get("starting_virtual_balance")
+        if self.realized_pnl < 0 and abs(self.realized_pnl) >= (start_balance * loss_limit_pct):
+            journal.record("skip", {"strategy": signal.strategy, "direction": signal.direction,
+                                    "reason": "daily loss limit reached", "symbol": quote.symbol})
             return None
-        order_id = res.get("id")
-        uf = res.get("unfilled_size")
-        try:
-            unfilled = int(float(uf)) if uf is not None else 0
-        except (TypeError, ValueError):
-            unfilled = 0
-        filled = config.CONTRACTS - unfilled
-        if filled <= 0 or res.get("state") == "cancelled":
-            journal.record("order_error", {
-                "strategy": signal.strategy, "symbol": quote.symbol, "order_id": order_id,
-                "error": f"entry not filled (state={res.get('state')}, unfilled={unfilled})"})
+
+        contracts, leverage = _confidence_params(signal.confidence)
+        
+        from .account import sync
+        margin = (entry * contracts * quote.contract_value) / leverage
+        if margin > sync.snapshot().get("available_usd", 0):
+            journal.record("skip", {"strategy": signal.strategy, "direction": signal.direction,
+                                    "reason": "insufficient virtual margin", "symbol": quote.symbol})
             return None
-        contracts = filled
-        # The exchange's own average fill is authoritative — never the quote.
-        fill = res.get("average_fill_price")
-        if fill:
-            entry = float(fill)
+        
+        order_id = _coid(signal.direction)
+        sync.deduct_margin(margin)
+        
         return self._register_position(signal.strategy, signal.direction, quote, signal,
-                                       entry, contracts, bar_seconds, order_id)
+                                       entry, contracts, bar_seconds, leverage, order_id)
 
     # -- resting limit entry --------------------------------------------- #
     def _open_limit(self, signal: Signal, quote: OptionQuote, bar_seconds: int) -> Optional[dict]:
@@ -436,102 +382,66 @@ class Executor:
             journal.record("skip", {"strategy": signal.strategy, "direction": signal.direction,
                                     "reason": "no bid/ask for limit price", "symbol": quote.symbol})
             return None
-        coid = _coid(signal.direction)
-        try:
-            res = client.place_order(quote.product_id, config.CONTRACTS, "buy",
-                                     "limit_order", limit_price=price,
-                                     client_order_id=coid)
-        except DeltaNetworkError as exc:
-            # A resting limit that may or may not exist is still dangerous: it
-            # can fill later with nothing tracking it. Resolve it by key.
-            res = self._recover_by_coid(coid)
-            if res is None:
-                journal.record("order_error", {
-                    "strategy": signal.strategy, "symbol": quote.symbol,
-                    "client_order_id": coid,
-                    "error": f"limit place ambiguous AND unrecoverable: {exc}",
-                    "action": "MANUAL CHECK REQUIRED — possible resting order"})
-                return None
-            journal.record("order_recovered", {
-                "strategy": signal.strategy, "symbol": quote.symbol,
-                "client_order_id": coid, "order_id": res.get("id")})
-        except DeltaError as exc:
-            journal.record("order_error", {"strategy": signal.strategy, "symbol": quote.symbol,
-                                           "error": str(exc)})
+        
+        # Check daily loss limit
+        from .settings import manager
+        loss_limit_pct = manager.get("daily_loss_limit_pct") / 100.0
+        start_balance = manager.get("starting_virtual_balance")
+        if self.realized_pnl < 0 and abs(self.realized_pnl) >= (start_balance * loss_limit_pct):
+            journal.record("skip", {"strategy": signal.strategy, "direction": signal.direction,
+                                    "reason": "daily loss limit reached", "symbol": quote.symbol})
             return None
-        order_id = res.get("id")
-        # It may have filled immediately (marketable) — handle that inline.
-        # NB: unfilled_size can legitimately be 0, so test for None, not falsiness.
-        uf = res.get("unfilled_size")
-        try:
-            unfilled = int(float(uf)) if uf is not None else config.CONTRACTS
-        except (TypeError, ValueError):
-            unfilled = config.CONTRACTS
-        filled = config.CONTRACTS - unfilled
-        if filled >= config.CONTRACTS:
-            fill = float(res.get("average_fill_price") or price)
-            return self._register_position(signal.strategy, signal.direction, quote,
-                                           signal, fill, filled, bar_seconds, order_id)
-        # Otherwise rest it and resolve over the next cycles.
+
+        contracts, leverage = _confidence_params(signal.confidence)
+        margin = (price * contracts * quote.contract_value) / leverage
+        
+        from .account import sync
+        if margin > sync.snapshot().get("available_usd", 0):
+            journal.record("skip", {"strategy": signal.strategy, "direction": signal.direction,
+                                    "reason": "insufficient virtual margin", "symbol": quote.symbol})
+            return None
+
+        order_id = _coid(signal.direction)
         pe = PendingEntry(order_id=order_id, strategy=signal.strategy,
                           direction=signal.direction, quote=quote, signal=signal,
-                          limit_price=price, requested=config.CONTRACTS,
-                          placed_at=time.time(), bar_seconds=bar_seconds, filled=filled)
+                          limit_price=price, requested=contracts,
+                          placed_at=time.time(), bar_seconds=bar_seconds, filled=0)
         self.pending[self._key(signal.strategy, signal.direction)] = pe
         journal.record("limit_placed", {
             "order_id": order_id, "strategy": signal.strategy, "direction": signal.direction,
-            "symbol": quote.symbol, "limit_price": price, "contracts": config.CONTRACTS,
+            "symbol": quote.symbol, "limit_price": price, "contracts": contracts,
             "reason": signal.reason})
         return pe.as_dict()
 
     def resolve_pending(self) -> None:
-        """Poll each resting limit: fill -> position, timeout -> cancel."""
+        """Poll each resting limit: simulate fill if crossed, timeout -> cancel."""
         if not self.pending:
             return
         with self._lock:
             for key, pe in list(self.pending.items()):
-                try:
-                    o = client.get_order(pe.order_id)
-                except DeltaError:
-                    continue  # transient; retry next cycle
-                state = o.get("state")
-                try:
-                    unfilled = int(float(o.get("unfilled_size")
-                                         if o.get("unfilled_size") is not None else pe.requested))
-                except (TypeError, ValueError):
-                    unfilled = pe.requested
-                filled = pe.requested - unfilled
-                fill_price = float(o.get("average_fill_price") or pe.limit_price)
                 aged_out = (time.time() - pe.placed_at) >= config.LIMIT_TTL_BARS * pe.bar_seconds
-
-                if state == "closed" and filled > 0:
+                
+                # Check for simulation fill
+                tick = bus.get(pe.quote.symbol)
+                fill_price = None
+                if tick and tick.get("best_ask"):
+                    if tick["best_ask"] <= pe.limit_price:
+                        fill_price = tick["best_ask"]
+                        
+                if fill_price is not None:
+                    filled = pe.requested
+                    from .account import sync
+                    contracts, leverage = _confidence_params(pe.signal.confidence)
+                    margin = (fill_price * filled * pe.quote.contract_value) / leverage
+                    sync.deduct_margin(margin)
                     self._register_position(pe.strategy, pe.direction, pe.quote, pe.signal,
-                                            fill_price, filled, pe.bar_seconds, pe.order_id)
-                    self.pending.pop(key, None)
-                elif state == "cancelled":
-                    if filled > 0:  # cancelled after a partial fill
-                        self._register_position(pe.strategy, pe.direction, pe.quote, pe.signal,
-                                                fill_price, filled, pe.bar_seconds, pe.order_id)
-                    else:
-                        journal.record("limit_cancelled", {"order_id": pe.order_id,
-                                       "strategy": pe.strategy, "symbol": pe.quote.symbol})
+                                            fill_price, filled, pe.bar_seconds, leverage, pe.order_id)
                     self.pending.pop(key, None)
                 elif aged_out:
-                    try:
-                        client.cancel_order(pe.order_id, pe.quote.product_id)
-                    except DeltaError as exc:
-                        journal.record("order_error", {"order_id": pe.order_id,
-                                       "symbol": pe.quote.symbol, "error": f"cancel failed: {exc}"})
-                        continue  # keep pending; retry cancel next cycle
-                    if filled > 0:
-                        self._register_position(pe.strategy, pe.direction, pe.quote, pe.signal,
-                                                fill_price, filled, pe.bar_seconds, pe.order_id)
-                    else:
-                        journal.record("limit_expired", {"order_id": pe.order_id,
-                                       "strategy": pe.strategy, "symbol": pe.quote.symbol,
-                                       "limit_price": pe.limit_price})
+                    journal.record("limit_expired", {"order_id": pe.order_id,
+                                   "strategy": pe.strategy, "symbol": pe.quote.symbol,
+                                   "limit_price": pe.limit_price})
                     self.pending.pop(key, None)
-                # else: still resting within TTL — leave it.
 
     # ------------------------------------------------------------------ #
     def _book_close(self, pos: Position, exit_price: float, contracts: int, why: str) -> None:
@@ -542,6 +452,11 @@ class Executor:
         net = gross - entry_fee_part - exit_fee
         self.session_equity += gross - exit_fee
         self.realized_pnl += net
+        
+        from .account import sync
+        margin_freed = (pos.entry_price * pos.contract_value * contracts) / pos.leverage
+        sync.add_margin_and_pnl(margin_freed, net)
+        
         full = contracts == pos.contracts
         journal.record("close" if full else "close_partial", {
             "id": pos.id, "strategy": pos.strategy, "direction": pos.direction,
@@ -554,7 +469,7 @@ class Executor:
             "expiry": pos.expiry, "entry_price": pos.entry_price, "exit_price": exit_price,
             "contracts": contracts, "contract_value": pos.contract_value,
             "gross_pnl": gross, "net_pnl": net, "why": why, "mode": pos.mode,
-            "partial": 0 if full else 1})
+            "partial": 0 if full else 1, "confidence": pos.confidence, "leverage": pos.leverage})
         if full:
             self.closed_count += 1
             if net > 0:
@@ -570,54 +485,8 @@ class Executor:
         self._rebuild_snapshot_locked()
 
     def _close(self, pos: Position, price: Optional[float], why: str, sell: bool = True) -> bool:
-        """Close a position. `sell=False` only for settled expiries, where the
-        exchange has already closed the position for us and sending an order
-        would open a new short."""
+        """Close a simulated position."""
         exit_price = price if price is not None else (pos.last_price or pos.entry_price)
-        if sell:
-            if pos.exit_ambiguous:
-                size = self._exchange_size(pos.product_id)
-                if size is None:
-                    return False
-                pos.exit_ambiguous = False
-                if size <= 0:
-                    self._book_close(pos, exit_price, pos.contracts, why + "_reconciled")
-                    return True
-            try:
-                # reduce_only is the load-bearing safety property here: it makes
-                # the exchange reject any sell that would exceed the open long,
-                # so even a duplicate send is a no-op instead of flipping the
-                # account SHORT an option with unbounded risk (audit #1).
-                res = client.place_order(
-                    pos.product_id, pos.contracts, "sell", "market_order",
-                    reduce_only=True,
-                    client_order_id=f"x{pos.id}{uuid.uuid4().hex[:14]}"[:32],
-                )
-            except DeltaNetworkError as exc:
-                pos.exit_ambiguous = True
-                journal.record("order_error", {"id": pos.id, "symbol": pos.symbol,
-                                               "error": f"exit ambiguous, will reconcile: {exc}"})
-                return False
-            except DeltaError as exc:
-                journal.record("order_error", {"id": pos.id, "symbol": pos.symbol,
-                                               "error": f"exit failed, will retry: {exc}"})
-                return False
-            uf = res.get("unfilled_size")
-            try:
-                unfilled = int(float(uf)) if uf is not None else 0
-            except (TypeError, ValueError):
-                unfilled = 0
-            filled = pos.contracts - unfilled
-            if filled <= 0:
-                journal.record("order_error", {"id": pos.id, "symbol": pos.symbol,
-                                               "error": f"exit not filled (state={res.get('state')})"})
-                return False
-            fill = res.get("average_fill_price")
-            if fill:
-                exit_price = float(fill)
-            if unfilled > 0:
-                self._book_close(pos, exit_price, filled, why)
-                return False
         self._book_close(pos, exit_price, pos.contracts, why)
         return True
 
@@ -673,18 +542,12 @@ class Executor:
 
     def flatten_all(self, why: str = "manual_flatten") -> int:
         with self._lock:
-            # Cancel any resting entries first so they can't fill after flatten.
-            for key, pe in list(self.pending.items()):
-                try:
-                    client.cancel_order(pe.order_id, pe.quote.product_id)
-                except DeltaError:
-                    pass
-                self.pending.pop(key, None)
+            self.pending.clear()
             n = 0
             for pos in list(self.positions.values()):
                 try:
                     price = self.resolver.live_price(pos.symbol)
-                except Exception:  # noqa: BLE001
+                except Exception:
                     price = None
                 if self._close(pos, price, why):
                     n += 1
@@ -693,115 +556,8 @@ class Executor:
 
     # ------------------------------------------------------------------ #
     def reconcile(self) -> None:
-        """Bring local state in line with the exchange, which is the truth.
-
-        This used to only journal a mismatch and then suppress the repeat, so a
-        persistent divergence was reported once and went quiet while an orphan
-        rode to expiry unmanaged (audit #9). Now:
-
-          GHOST  — tracked locally, absent on the exchange. Booked closed so
-                   MAX_OPEN, the cooldown map and P&L stop drifting.
-          ORPHAN — size on the exchange we never tracked. It has no stop, no
-                   target and no time exit. Journalled every check, and closed
-                   with reduce_only when AUTO_FLATTEN_ORPHANS is on.
-
-        The bulk (10s-stale) positions endpoint is acceptable here: this is a
-        periodic audit, not the ambiguous-exit decision that needs realtime data.
-        """
-        try:
-            rows = client.positions()
-        except DeltaError:
-            return
-
-        exch: dict[int, int] = {}
-        exch_entry: dict[int, float] = {}
-        for p in rows or []:
-            pid = p.get("product_id") or (p.get("product") or {}).get("id")
-            try:
-                size = int(float(p.get("size") or 0))
-            except (TypeError, ValueError):
-                size = 0
-            if pid and size:
-                exch[int(pid)] = exch.get(int(pid), 0) + size
-                # Delta returns entry_price as a string; adoption prefers it
-                # over a live quote because it is the position's real basis.
-                try:
-                    ep = p.get("entry_price")
-                    if ep is not None:
-                        exch_entry[int(pid)] = float(ep)
-                except (TypeError, ValueError):
-                    pass
-
-        with self._lock:
-            tracked: dict[int, int] = {}
-            for pos in self.positions.values():
-                tracked[pos.product_id] = tracked.get(pos.product_id, 0) + pos.contracts
-            if exch == tracked:
-                self._last_reconcile_sig = None
-                return
-
-            journal.record("reconcile_mismatch", {
-                "exchange": {str(k): v for k, v in exch.items()},
-                "tracked": {str(k): v for k, v in tracked.items()}})
-
-            # GHOSTS: we believe we hold it, the exchange disagrees.
-            for pos in list(self.positions.values()):
-                if exch.get(pos.product_id, 0) < tracked.get(pos.product_id, 0):
-                    px = pos.last_price if pos.last_price is not None else pos.entry_price
-                    journal.record("ghost_closed", {
-                        "id": pos.id, "symbol": pos.symbol,
-                        "product_id": pos.product_id,
-                        "note": "exchange has no such position — booking local close"})
-                    self._book_close(pos, px, pos.contracts, "ghost_reconciled")
-
-            # SHORT positions. The engine's Position model is long-only —
-            # target/stop are computed as entry*(1±pct) and _close() SELLS — so
-            # a short cannot be adopted without silently inverting its risk.
-            # A short option also carries the unbounded tail this codebase went
-            # to some trouble to prevent (audit #1: a reduce_only-less sell on a
-            # flat book opens exactly this). Surface it; never auto-adopt it.
-            for pid, size in exch.items():
-                if size >= 0:
-                    continue
-                journal.record("short_position_detected", {
-                    "product_id": pid, "size": size,
-                    "note": "SHORT position on the exchange. The engine cannot "
-                            "manage shorts — no stop, no target, no time exit. "
-                            "Close it manually or via POST /api/strategy/"
-                            "flatten-shorts.",
-                    "severity": "critical"})
-
-            # ORPHANS: untracked LONG size — adoptable.
-            for pid, size in exch.items():
-                if size <= 0:
-                    continue
-                extra = size - tracked.get(pid, 0)
-                if extra <= 0:
-                    continue
-                journal.record("orphan_detected", {
-                    "product_id": pid, "untracked_size": extra,
-                    "policy": config.ORPHAN_POLICY,
-                    "note": "position on exchange with NO local stop-loss"})
-                if config.ORPHAN_POLICY == "report":
-                    continue
-                if config.ORPHAN_POLICY == "adopt":
-                    if self._adopt(pid, extra, entry_hint=exch_entry.get(pid)):
-                        continue
-                    # Adoption failed (unknown product / no contract_value).
-                    # Fall through to flatten rather than leave it unmanaged.
-                    journal.record("orphan_adopt_failed", {
-                        "product_id": pid, "size": extra,
-                        "note": "could not resolve contract — flattening instead"})
-                try:
-                    client.place_order(
-                        pid, extra, "sell", "market_order", reduce_only=True,
-                        client_order_id=f"orph{uuid.uuid4().hex[:20]}"[:32])
-                    journal.record("orphan_flattened",
-                                   {"product_id": pid, "size": extra})
-                except DeltaError as exc:
-                    journal.record("order_error", {
-                        "product_id": pid,
-                        "error": f"orphan flatten failed: {exc}"})
+        """Paper trading - internal simulation does not reconcile with an exchange."""
+        pass
 
     def _adopt(self, product_id: int, size: int,
                entry_hint: Optional[float] = None) -> bool:
@@ -829,11 +585,12 @@ class Executor:
         sig = Signal(strategy="adopted", direction=quote.side,
                      reason=f"adopted from exchange (product {product_id})",
                      sl_pct=config.ADOPT_SL_PCT, rr=config.ADOPT_RR,
+                     confidence=50,
                      meta={"adopted": True, "product_id": product_id})
         bar_seconds = 60
         self._register_position(sig.strategy, sig.direction, quote, sig,
                                 float(entry), int(size), bar_seconds,
-                                order_id=None)
+                                leverage=1, order_id=None)
         journal.record("orphan_adopted", {
             "product_id": product_id, "size": size, "symbol": quote.symbol,
             "entry_price": float(entry), "sl_pct": config.ADOPT_SL_PCT,

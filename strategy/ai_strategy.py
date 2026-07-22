@@ -252,6 +252,7 @@ class AIStrategy(Strategy):
         return [Signal(
             self.slug, direction,
             f"AI {conf:.0%}: {reason}"[:160],
+            confidence=max(1, min(100, int(conf * 100))),
             sl_pct=self.params.get("sl_pct", 0.10),
             rr=self.params.get("rr", 1.5),
             meta={"confidence": conf, "model": config.AI_MODEL},

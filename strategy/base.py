@@ -22,6 +22,7 @@ class Signal:
     reason: str
     sl_pct: float = 0.05     # stop loss as a fraction of entry premium
     rr: float = 1.5          # reward:risk -> target_pct = sl_pct * rr
+    confidence: int = 50     # 1-100 score for dynamic position sizing
     basis: str = "underlying"  # "underlying" | "premium"
     limit_offset_pct: Optional[float] = None  # limit-entry offset above premium
     max_hold_bars: Optional[int] = None

@@ -5,8 +5,12 @@
   const $ = (id) => document.getElementById(id);
   const fmt = (v, d = 2) =>
     v === null || v === undefined || Number.isNaN(v) ? "—" : Number(v).toLocaleString("en-US", { minimumFractionDigits: d, maximumFractionDigits: d });
-  const money = (v) =>
-    v === null || v === undefined ? "—" : (v < 0 ? "-$" : "$") + fmt(Math.abs(v), 2);
+  const money = (v) => {
+    if (v === null || v === undefined) return "—";
+    const absV = Math.abs(v);
+    const decimals = (absV > 0 && absV < 0.01) ? 4 : 2;
+    return (v < 0 ? "-$" : "$") + fmt(absV, decimals);
+  };
 
   let strategiesRendered = false;
   let feedCache = [];
@@ -139,6 +143,9 @@
           <td><span class="tag ${p.direction === "CE" ? "ce" : "pe"}">${p.direction}</span></td>
           <td style="color:var(--text-dim)">${p.symbol}</td>
           <td>${fmt(p.strike, 0)}</td>
+          <td>${p.confidence || 50}%</td>
+          <td>${p.contracts || 1}</td>
+          <td>${p.leverage || 1}x</td>
           <td>${fmt(p.entry_price, 2)}</td>
           <td>${fmt(p.current_price, 2)}</td>
           <td class="pos">${fmt(p.target, 2)}</td>
@@ -209,9 +216,10 @@
     // backend can never be in would be worse than useless: it is the exact
     // misreading that gets someone to click Start thinking it is a dry run.
     const badge = $("mode-badge");
-    badge.textContent = "LIVE DEMO";
-    badge.className = "badge live";
-    $("acct-title").textContent = "Delta Account (testnet)";
+    badge.textContent = "PAPER";
+    badge.className = "badge paper";
+    if ($("acct-title")) $("acct-title").textContent = "Delta Account (Paper)";
+    if ($("acct-subtitle")) $("acct-subtitle").innerHTML = (st.errors ? Object.keys(st.errors).length : 0) + " errors";
 
     // The account arrives by WebSocket push now (server-side sync loop), so no
     // polling timer is needed — one initial paint covers a fresh page load
@@ -222,10 +230,9 @@
     }
 
     $("mode-note").innerHTML =
-      "⚠ <strong>LIVE ONLY</strong> — starting the engine places <strong>real orders</strong> " +
-      "on the Delta testnet demo book at <strong>" + (cfg.contracts ?? "?") +
-      "</strong> contract(s) per trade. There is no paper mode and no dry run. " +
-      "No real money is at risk, but the order flow is genuine.";
+      "The engine is currently <strong>" + cfg.execution_mode + "</strong>.<br>" +
+      "Simulated orders will be placed internally using production data at <strong>" + (cfg.contracts ?? "?") +
+      " contracts</strong> per signal.<br>";
 
     $("m-asset").textContent = cfg.asset || "—";
     $("m-spot").textContent = st.spot ? fmt(st.spot, 1) : "—";
@@ -318,9 +325,9 @@
     const enabled = ((lastStatus && lastStatus.strategies) || [])
       .filter((s) => s.enabled).length;
     if (!confirm(
-      "Arm the engine — LIVE ONLY.\n\n" +
-      "Real orders will be placed on the Delta testnet demo book.\n" +
-      "There is no paper mode and no dry run.\n\n" +
+      "WARNING: This will place a simulated market order to immediately enter a position.\n" +
+      "Virtual orders will be placed internally using the live production book.\n" +
+      "No real money or testnet funds are used.\n\n" +
       "  size            : " + n + " contract(s) per trade\n" +
       "  strategies armed: " + enabled + "\n\n" +
       "Continue?")) return;
@@ -363,6 +370,60 @@
   AppWS.onStatus((s) => {
     const el = $("estate-text");
     if (el && s !== "connected") el.title = `live feed: ${s}`;
+  });
+
+  // ---- Settings ------------------------------------------
+
+  async function loadSettings() {
+    try {
+      const res = await fetch("/api/settings");
+      if (!res.ok) return;
+      const data = await res.json();
+      $("set-max-lot").value = data.max_lot_size || 10;
+      $("set-max-lev").value = data.max_leverage_cap || 20;
+      $("set-start-bal").value = data.starting_virtual_balance || 100000;
+      $("set-loss-lim").value = data.daily_loss_limit_pct || 20;
+      $("set-max-pos").value = data.max_open_positions || 5;
+      
+      $("set-lot-vlow").value = data.lot_pct_very_low || 10; $("set-lev-vlow").value = data.leverage_very_low || 2;
+      $("set-lot-low").value = data.lot_pct_low || 25; $("set-lev-low").value = data.leverage_low || 5;
+      $("set-lot-med").value = data.lot_pct_medium || 50; $("set-lev-med").value = data.leverage_medium || 10;
+      $("set-lot-high").value = data.lot_pct_high || 75; $("set-lev-high").value = data.leverage_high || 15;
+      $("set-lot-vhigh").value = data.lot_pct_very_high || 100; $("set-lev-vhigh").value = data.leverage_very_high || 20;
+    } catch (e) {
+      console.error("failed to load settings", e);
+    }
+  }
+
+  $("btn-settings").addEventListener("click", () => {
+    loadSettings();
+    $("settings-modal").style.display = "flex";
+  });
+  
+  $("btn-close-settings").addEventListener("click", () => {
+    $("settings-modal").style.display = "none";
+  });
+
+  $("btn-save-settings").addEventListener("click", async () => {
+    const payload = {
+      max_lot_size: parseInt($("set-max-lot").value),
+      max_leverage_cap: parseInt($("set-max-lev").value),
+      starting_virtual_balance: parseFloat($("set-start-bal").value),
+      daily_loss_limit_pct: parseFloat($("set-loss-lim").value),
+      max_open_positions: parseInt($("set-max-pos").value),
+      lot_pct_very_low: parseInt($("set-lot-vlow").value),
+      leverage_very_low: parseInt($("set-lev-vlow").value),
+      lot_pct_low: parseInt($("set-lot-low").value),
+      leverage_low: parseInt($("set-lev-low").value),
+      lot_pct_medium: parseInt($("set-lot-med").value),
+      leverage_medium: parseInt($("set-lev-med").value),
+      lot_pct_high: parseInt($("set-lot-high").value),
+      leverage_high: parseInt($("set-lev-high").value),
+      lot_pct_very_high: parseInt($("set-lot-vhigh").value),
+      leverage_very_high: parseInt($("set-lev-vhigh").value)
+    };
+    await post("/api/settings", payload);
+    $("settings-modal").style.display = "none";
   });
 
   // One initial REST call to populate config/strategy cards, then push-driven.

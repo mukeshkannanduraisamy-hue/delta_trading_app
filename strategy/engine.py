@@ -274,14 +274,10 @@ class Engine:
     # Lifecycle
     # ------------------------------------------------------------------ #
     def preflight(self) -> Optional[str]:
-        """Reasons the engine must NOT start, or None if it is safe to.
-
-        Paper mode was removed, so there is no simulated fallback: an engine
-        that starts without working credentials would evaluate strategies, fire
-        signals, and fail every single order — burning rate limit and filling
-        the journal with noise while looking like it is trading. Refusing to
-        start is the honest failure.
-        """
+        """Reasons the engine must NOT start, or None if it is safe to."""
+        if config.EXECUTION_MODE == "paper":
+            return None
+            
         if not (config.API_KEY and config.API_SECRET):
             return ("DELTA_API_KEY / DELTA_API_SECRET are not set. This engine "
                     "places real testnet orders and has no simulated fallback.")
@@ -311,7 +307,7 @@ class Engine:
             return False
         journal.record("engine", {"event": "start_armed", "mode": config.EXECUTION_MODE,
                                   "contracts": config.CONTRACTS,
-                                  "note": "LIVE ONLY — real testnet orders will be placed"})
+                                  "note": "PAPER TRADING — simulating orders internally"})
         self.running = True
         self._task = asyncio.create_task(self._run())
         return True

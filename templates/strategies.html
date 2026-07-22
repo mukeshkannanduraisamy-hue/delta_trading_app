@@ -84,6 +84,15 @@
   .ftext { color: var(--text); }
   .warn-note { font-size: 12px; color: var(--warning); background: rgba(210,153,34,.1);
     border:1px solid rgba(210,153,34,.3); border-radius:6px; padding:10px 12px; }
+
+  /* Modal & Form */
+  .modal-overlay { position:fixed; inset:0; background:rgba(0,0,0,0.5); display:none; justify-content:center; align-items:center; z-index:999; }
+  .modal { background:var(--card-bg); border:1px solid var(--border); border-radius:var(--radius); padding:20px; width:500px; max-width:90vw; max-height:90vh; overflow-y:auto; }
+  .modal h3 { margin-top:0; border-bottom:1px solid var(--border); padding-bottom:10px; margin-bottom:15px; }
+  .form-group { margin-bottom: 15px; }
+  .form-group label { display:block; font-size:12px; font-weight:600; margin-bottom:5px; }
+  .form-group input { width:100%; padding:8px; border:1px solid var(--border); border-radius:4px; background:var(--card-bg-2); color:var(--text); }
+  .modal-actions { display:flex; justify-content:flex-end; gap:10px; margin-top:20px; }
 </style>
 
 <div class="strat-wrap">
@@ -97,6 +106,7 @@
     <button class="btn go"   id="btn-start">▶ Start</button>
     <button class="btn stop" id="btn-stop" disabled>■ Stop</button>
     <button class="btn ghost" id="btn-flatten">Flatten all</button>
+    <button class="btn ghost" id="btn-settings">⚙ Sizing Settings</button>
     <div class="engine-meta">
       <div class="em"><span class="k">Asset</span><span class="v" id="m-asset">—</span></div>
       <div class="em"><span class="k">Spot</span><span class="v" id="m-spot">—</span></div>
@@ -115,7 +125,7 @@
     <!-- Right: account + stats -->
     <div style="display:flex; flex-direction:column; gap: var(--gap);">
       <div class="panel">
-        <h3 id="acct-title">Delta Account (testnet)</h3>
+        <h3 id="acct-title">Delta Account (Paper)</h3>
         <div class="body">
           <div class="stat-grid">
             <div class="stat-box"><div class="k">Account USD</div><div class="v" id="s-balance">—</div></div>
@@ -131,7 +141,7 @@
         </div>
       </div>
       <div class="panel">
-        <h3>Demo Wallet (testnet) <button class="btn ghost" id="btn-acct" style="margin-left:auto;padding:4px 10px;font-size:11px;">Refresh</button></h3>
+        <h3>Virtual Wallet (Paper) <button class="btn ghost" id="btn-acct" style="margin-left:auto;padding:4px 10px;font-size:11px;">Refresh</button></h3>
         <div class="body" id="acct-body"><div class="empty">Click refresh to load the live demo balance.</div></div>
       </div>
     </div>
@@ -142,7 +152,7 @@
     <h3>Open Positions</h3>
     <div class="body" style="padding:0;">
       <table class="t"><thead><tr>
-        <th>Strategy</th><th>Side</th><th>Symbol</th><th>Strike</th>
+        <th>Strategy</th><th>Side</th><th>Symbol</th><th>Strike</th><th>Conf</th><th>Lots</th><th>Lev</th>
         <th>Entry</th><th>Now</th><th>Target</th><th>Stop</th><th>uPnL</th><th>Age</th>
       </tr></thead><tbody id="pos-body"><tr><td colspan="10" class="empty">No open positions.</td></tr></tbody></table>
     </div>
@@ -154,6 +164,34 @@
     <div class="body feed" id="feed"><div class="empty">No events yet.</div></div>
   </div>
 
+</div>
+
+<!-- Settings Modal -->
+<div class="modal-overlay" id="settings-modal">
+  <div class="modal">
+    <h3>Configuration Settings</h3>
+    <div style="display:flex; gap:15px;">
+      <div style="flex:1;">
+        <div class="form-group"><label>Max Lot Size</label><input type="number" id="set-max-lot" value="10"></div>
+        <div class="form-group"><label>Max Leverage Cap</label><input type="number" id="set-max-lev" value="20"></div>
+        <div class="form-group"><label>Starting Virtual Balance</label><input type="number" id="set-start-bal" value="100000"></div>
+        <div class="form-group"><label>Daily Loss Limit (%)</label><input type="number" id="set-loss-lim" value="20"></div>
+        <div class="form-group"><label>Max Open Positions</label><input type="number" id="set-max-pos" value="5"></div>
+      </div>
+      <div style="flex:1;">
+        <h4 style="margin:0 0 10px 0; font-size:12px;">Tier % / Leverage</h4>
+        <div class="form-group" style="display:flex; gap:5px;"><input type="number" id="set-lot-vlow" placeholder="%"><input type="number" id="set-lev-vlow" placeholder="x"> <span style="font-size:10px;align-self:center;">V.Low</span></div>
+        <div class="form-group" style="display:flex; gap:5px;"><input type="number" id="set-lot-low" placeholder="%"><input type="number" id="set-lev-low" placeholder="x"> <span style="font-size:10px;align-self:center;">Low</span></div>
+        <div class="form-group" style="display:flex; gap:5px;"><input type="number" id="set-lot-med" placeholder="%"><input type="number" id="set-lev-med" placeholder="x"> <span style="font-size:10px;align-self:center;">Med</span></div>
+        <div class="form-group" style="display:flex; gap:5px;"><input type="number" id="set-lot-high" placeholder="%"><input type="number" id="set-lev-high" placeholder="x"> <span style="font-size:10px;align-self:center;">High</span></div>
+        <div class="form-group" style="display:flex; gap:5px;"><input type="number" id="set-lot-vhigh" placeholder="%"><input type="number" id="set-lev-vhigh" placeholder="x"> <span style="font-size:10px;align-self:center;">V.High</span></div>
+      </div>
+    </div>
+    <div class="modal-actions">
+      <button class="btn ghost" id="btn-close-settings">Cancel</button>
+      <button class="btn go" id="btn-save-settings">Save</button>
+    </div>
+  </div>
 </div>
 {% endblock %}
 

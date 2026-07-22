@@ -656,6 +656,10 @@ def _account_health() -> dict:
         pid = p.get("product_id")
         if pid:
             tracked[int(pid)] = tracked.get(int(pid), 0) + (p.get("contracts") or 0)
+    
+    if strat_config.EXECUTION_MODE == "paper":
+        exch = dict(tracked)
+        
     drift = sorted(set(exch) | set(tracked))
     mismatched = [pid for pid in drift if exch.get(pid, 0) != tracked.get(pid, 0)]
     shorts = {pid: sz for pid, sz in exch.items() if sz < 0}
@@ -1251,31 +1255,30 @@ async def api_health():
     """
     def _probe():
         out: dict = {}
-        # API auth reachability (the recurring failure mode is IP whitelisting).
-        try:
-            # Single attempt: health is polled continuously, and during an
-            # upstream outage waiting through the full 5XX backoff ladder makes
-            # every poll take ~12s. Reporting the failure fast is the point.
-            delta_client.profile(retries=1)
+        if strat_config.EXECUTION_MODE == "paper":
             out["auth"] = {"ok": True}
-        except DeltaError as exc:
-            msg = str(exc)
-            ip = None
-            if "client_ip" in msg:
-                try:
-                    ip = msg.split('"client_ip":')[1].split('"')[1]
-                except (IndexError, ValueError):
-                    ip = None
-            out["auth"] = {
-                "ok": False,
-                "error": msg[:200],
-                "client_ip": ip,
-                "hint": ("This IP is not whitelisted on the demo API key. The IP rotates on "
-                         "mobile/CGNAT networks — remove the IP restriction on the key entirely.")
-                if ip else None,
-            }
-        except Exception as exc:  # noqa: BLE001
-            out["auth"] = {"ok": False, "error": str(exc)[:200]}
+        else:
+            try:
+                delta_client.profile(retries=1)
+                out["auth"] = {"ok": True}
+            except DeltaError as exc:
+                msg = str(exc)
+                ip = None
+                if "client_ip" in msg:
+                    try:
+                        ip = msg.split('"client_ip":')[1].split('"')[1]
+                    except (IndexError, ValueError):
+                        ip = None
+                out["auth"] = {
+                    "ok": False,
+                    "error": msg[:200],
+                    "client_ip": ip,
+                    "hint": ("This IP is not whitelisted on the demo API key. The IP rotates on "
+                             "mobile/CGNAT networks — remove the IP restriction on the key entirely.")
+                    if ip else None,
+                }
+            except Exception as exc:  # noqa: BLE001
+                out["auth"] = {"ok": False, "error": str(exc)[:200]}
         out["iv_collection"] = strat_store.iv_snapshot_stats()
         out["trades_recorded"] = strat_store.count_trades()
         return out
@@ -1373,3 +1376,87 @@ async def ws_market(ws: WebSocket):
         pass
     finally:
         await hub.unregister(ws)
+
+@app.get("/api/settings")
+async def api_get_settings():
+    from strategy.settings import manager as settings_manager
+    return settings_manager.all()
+
+@app.post("/api/settings")
+async def api_post_settings(request: Request):
+    from strategy.settings import manager as settings_manager
+    data = await request.json()
+    settings_manager.update(data)
+    return {"ok": True, "settings": settings_manager.all()}
+
+@app.get("/api/auto-confidence/preview")
+async def api_preview_confidence(symbol: str, side: str, confidence: int = 50):
+    from strategy.executor import _confidence_params
+    from strategy.pricebus import bus
+    contracts, leverage = _confidence_params(confidence)
+    
+    spot = bus.spot(symbol) or engine.last_spot or 0.0
+    q_dict = engine.executor.resolver.atm(spot)
+    quote = q_dict.get(side.upper())
+    
+    if not quote:
+        return JSONResponse(status_code=400, content={"error": "No tradable option found for current spot price."})
+        
+    entry = quote.best_ask or quote.mark_price or 0.0
+    margin = (entry * contracts * quote.contract_value) / leverage if leverage else 0.0
+    
+    conf = max(1, min(100, confidence))
+    if conf <= 20: tier = "Very Low"
+    elif conf <= 40: tier = "Low"
+    elif conf <= 60: tier = "Medium"
+    elif conf <= 80: tier = "High"
+    else: tier = "Very High"
+    
+    return {
+        "symbol": quote.symbol,
+        "entry_price": entry,
+        "contracts": contracts,
+        "leverage": leverage,
+        "margin": margin,
+        "tier": tier,
+        "contract_value": quote.contract_value,
+        "available_usd": account_sync.snapshot().get("available_usd", 0)
+    }
+
+@app.post("/api/order/place")
+async def api_order_place(request: Request):
+    data = await request.json()
+    symbol = data.get("symbol", "BTCUSD")
+    side = data.get("side", "CE")
+    confidence = int(data.get("confidence", 50))
+    
+    def do_trade():
+        from strategy.pricebus import bus
+        spot = bus.spot(symbol) or engine.last_spot or 0.0
+        q_dict = engine.executor.resolver.atm(spot)
+        quote = q_dict.get(side.upper())
+            
+        if not quote:
+            return {"error": "Could not resolve ATM option for entry."}
+            
+        from strategy.base import Signal
+        sig = Signal(
+            strategy="manual",
+            direction=side.upper(),
+            reason=f"Manual trade at {confidence}% confidence",
+            confidence=confidence,
+            sl_pct=0.10,
+            rr=1.5
+        )
+        res = engine.executor.open(sig, quote, 60)
+        return {"ok": bool(res), "position": res}
+        
+    try:
+        res = await asyncio.to_thread(do_trade)
+        if "error" in res:
+            return JSONResponse(status_code=400, content=res)
+        return res
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return JSONResponse(status_code=500, content={"error": str(e)})

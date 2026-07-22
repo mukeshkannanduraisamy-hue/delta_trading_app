@@ -1,0 +1,17 @@
+{
+    "max_lot_size": 100,
+    "max_leverage_cap": 200,
+    "leverage_very_low": 2,
+    "leverage_low": 5,
+    "leverage_medium": 10,
+    "leverage_high": 15,
+    "leverage_very_high": 20,
+    "lot_pct_very_low": 10,
+    "lot_pct_low": 25,
+    "lot_pct_medium": 50,
+    "lot_pct_high": 75,
+    "lot_pct_very_high": 100,
+    "starting_virtual_balance": 100000,
+    "daily_loss_limit_pct": 20,
+    "max_open_positions": 50
+}

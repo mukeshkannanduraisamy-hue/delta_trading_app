@@ -13,44 +13,24 @@ load_dotenv(BASE_DIR / ".env")
 # --------------------------------------------------------------------------- #
 # API endpoints
 # --------------------------------------------------------------------------- #
-# Production public market data (deep, reliable) — used for signal candles.
+# Production public market data (deep, reliable)
 PROD_BASE = "https://api.india.delta.exchange"
-# Testnet demo base — the ONLY place the demo API keys are valid, and the only
-# book we ever place real orders on.
-TESTNET_BASE = "https://cdn-ind.testnet.deltaex.org"
+# Testnet demo base is removed for paper trading against prod data
+TESTNET_BASE = PROD_BASE
 
-API_KEY = os.getenv("DELTA_API_KEY", "").strip()
-API_SECRET = os.getenv("DELTA_API_SECRET", "").strip()
+API_KEY = ""
+API_SECRET = ""
 
 # --------------------------------------------------------------------------- #
 # Execution — LIVE ONLY
 # --------------------------------------------------------------------------- #
-# Paper (simulated-fill) mode was REMOVED on 2026-07-21 at the operator's
-# request. There is exactly one execution path now: real orders on the Delta
-# testnet demo book via POST /v2/orders.
-#
-# Consequences worth knowing before starting the engine:
-#   * Starting the engine places real orders. There is no dry run any more.
-#   * With no simulated fallback, missing or invalid API credentials are a HARD
-#     failure at start() rather than a silent degrade to simulation.
-#   * Signed requests are hardcoded to TESTNET_BASE in delta_client, so this
-#     cannot reach a real-money book — but the order flow is genuine.
-#
-# EXECUTION_MODE is retained as a read-only label for the UI and journal so the
-# mode recorded on historical trades stays meaningful; setting it has no effect.
-EXECUTION_MODE = "live_demo"
-LIVE_DEMO = True
+# Paper execution mode (simulated internally using production data)
+EXECUTION_MODE = "paper"
+LIVE_DEMO = False
 
-# Option resolution and orders both use the testnet book, so the product being
-# priced is the same one the order is sent to.
-EXEC_BASE = TESTNET_BASE
+EXEC_BASE = PROD_BASE
 
-# If the .env still asks for paper, say so loudly rather than silently ignoring
-# it — a stale config that looks safe but is not is worse than no config.
 _requested_mode = os.getenv("EXECUTION_MODE", "").strip().lower()
-if _requested_mode and _requested_mode != "live_demo":
-    print(f"[config] WARNING: EXECUTION_MODE={_requested_mode!r} in .env is IGNORED — "
-          f"paper mode was removed; this engine places REAL testnet orders.")
 
 ASSET = os.getenv("ENGINE_ASSET", "BTC").strip().upper()
 # Underlying perpetual whose candles drive the directional strategies.
@@ -179,10 +159,10 @@ def summary() -> dict:
         "contracts": CONTRACTS,
         "autostart": AUTOSTART,
         "exec_base": EXEC_BASE,
-        "live_only": True,
-        "paper_mode_available": False,
+        "live_only": False,
+        "paper_mode_available": True,
         "session_equity_base": SESSION_EQUITY_BASE,
-        "has_keys": bool(API_KEY and API_SECRET),
+        "has_keys": False,
         "entry_order_type": ENTRY_ORDER_TYPE,
         "limit_anchor": LIMIT_ANCHOR,
     }

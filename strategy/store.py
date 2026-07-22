@@ -60,7 +60,9 @@ def init_db() -> None:
                 net_pnl       REAL,
                 why           TEXT,
                 mode          TEXT,
-                partial       INTEGER DEFAULT 0
+                partial       INTEGER DEFAULT 0,
+                confidence    INTEGER DEFAULT 50,
+                leverage      INTEGER DEFAULT 1
             )
             """
         )
@@ -93,12 +95,18 @@ def init_db() -> None:
             if col not in have:
                 c.execute(f"ALTER TABLE iv_snapshots ADD COLUMN {col} REAL")
 
+        have_trades = {r["name"] for r in c.execute("PRAGMA table_info(trades)")}
+        if "confidence" not in have_trades:
+            c.execute("ALTER TABLE trades ADD COLUMN confidence INTEGER DEFAULT 50")
+        if "leverage" not in have_trades:
+            c.execute("ALTER TABLE trades ADD COLUMN leverage INTEGER DEFAULT 1")
+
 
 def record_trade(row: dict) -> None:
     cols = (
         "ts_open", "ts_close", "strategy", "direction", "symbol", "strike",
         "expiry", "entry_price", "exit_price", "contracts", "contract_value",
-        "gross_pnl", "net_pnl", "why", "mode", "partial",
+        "gross_pnl", "net_pnl", "why", "mode", "partial", "confidence", "leverage"
     )
     try:
         with _write_lock, _conn() as c:

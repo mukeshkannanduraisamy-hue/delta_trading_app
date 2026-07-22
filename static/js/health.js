@@ -56,10 +56,10 @@
       warn.style.display = "block";
       warn.className = "hwarn bad";
       warn.innerHTML = `<strong>Auth failed:</strong> ${auth.client_ip ? `IP <code>${auth.client_ip}</code> is not whitelisted. ` : ""}${auth.hint || auth.error || ""}`;
-    } else if (eng.mode === "live_demo" && eng.running) {
+    } else if (d.config && d.config.paper_mode_available) {
+      warn.className = "alert alert-info";
+      warn.innerHTML = "<strong>Paper trading is active</strong> - simulated orders using live production data.";
       warn.style.display = "block";
-      warn.className = "hwarn";
-      warn.innerHTML = "<strong>Live demo trading is active</strong> — real orders are being placed on the testnet book.";
     } else {
       warn.style.display = "none";
     }

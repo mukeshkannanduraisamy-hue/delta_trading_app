@@ -45,9 +45,9 @@ class EMACross(Strategy):
             return []
         sl, rr = self.params.get("sl_pct", 0.06), self.params.get("rr", 1.2)
         if fast[-2] <= slow[-2] and fast[-1] > slow[-1]:
-            return [Signal(self.slug, "CE", "9EMA crossed above 21EMA", sl, rr)]
+            return [Signal(self.slug, "CE", "9EMA crossed above 21EMA", sl, rr, confidence=65)]
         if fast[-2] >= slow[-2] and fast[-1] < slow[-1]:
-            return [Signal(self.slug, "PE", "9EMA crossed below 21EMA", sl, rr)]
+            return [Signal(self.slug, "PE", "9EMA crossed below 21EMA", sl, rr, confidence=65)]
         return []
 
 
@@ -79,9 +79,9 @@ class ScalpingPulse(Strategy):
         touched_low = min(float(x["low"]) for x in u[-3:]) <= f
         touched_high = max(float(x["high"]) for x in u[-3:]) >= f
         if fast[-1] > slow[-1] and touched_low and _green(last) and float(last["close"]) > float(prev["high"]):
-            return [Signal(self.slug, "CE", "Bull trend, pullback to 9EMA, breakout candle", sl, rr)]
+            return [Signal(self.slug, "CE", "Bull trend, pullback to 9EMA, breakout candle", sl, rr, confidence=75)]
         if fast[-1] < slow[-1] and touched_high and not _green(last) and float(last["close"]) < float(prev["low"]):
-            return [Signal(self.slug, "PE", "Bear trend, pullback to 9EMA, breakdown candle", sl, rr)]
+            return [Signal(self.slug, "PE", "Bear trend, pullback to 9EMA, breakdown candle", sl, rr, confidence=75)]
         return []
 
 
@@ -114,9 +114,9 @@ class TrafficLight(Strategy):
         sl, rr = self.params.get("sl_pct", 0.08), self.params.get("rr", 1.2)
         close = float(brk["close"])
         if close > upper and (trend is None or close >= trend):
-            return [Signal(self.slug, "CE", "Break above 2-candle pair high", sl, rr)]
+            return [Signal(self.slug, "CE", "Break above 2-candle pair high", sl, rr, confidence=50)]
         if close < lower and (trend is None or close <= trend):
-            return [Signal(self.slug, "PE", "Break below 2-candle pair low", sl, rr)]
+            return [Signal(self.slug, "PE", "Break below 2-candle pair low", sl, rr, confidence=50)]
         return []
 
 
@@ -148,9 +148,9 @@ class InsideCandle(Strategy):
         close = float(brk["close"])
         sl, rr = self.params.get("sl_pct", 0.08), self.params.get("rr", 2.0)
         if close > mh and (close - mh) <= 0.35 * rng:
-            return [Signal(self.slug, "CE", "Inside-bar breakout above mother", sl, rr)]
+            return [Signal(self.slug, "CE", "Inside-bar breakout above mother", sl, rr, confidence=55)]
         if close < ml and (ml - close) <= 0.35 * rng:
-            return [Signal(self.slug, "PE", "Inside-bar breakdown below mother", sl, rr)]
+            return [Signal(self.slug, "PE", "Inside-bar breakdown below mother", sl, rr, confidence=55)]
         return []
 
 
@@ -179,9 +179,9 @@ class MeanReversionBollinger(Strategy):
         # Fire on the CROSS beyond a band (the extreme event), not on every
         # candle that remains outside it.
         if close > up[-1] and prev <= up[-2]:
-            return [Signal(self.slug, "PE", "Close crossed above upper Bollinger band (fade)", sl, rr)]
+            return [Signal(self.slug, "PE", "Close crossed above upper Bollinger band (fade)", sl, rr, confidence=85)]
         if close < lo[-1] and prev >= lo[-2]:
-            return [Signal(self.slug, "CE", "Close crossed below lower Bollinger band (fade)", sl, rr)]
+            return [Signal(self.slug, "CE", "Close crossed below lower Bollinger band (fade)", sl, rr, confidence=85)]
         return []
 
 
@@ -220,9 +220,9 @@ class PrimeScalperEMA(Strategy):
         # Blog wording: the slope CROSSES the threshold — fire on the crossing
         # candle only, so persisting momentum doesn't re-signal every bar.
         if prev_norm <= thr < norm and c[-1] > e[-1] and _green(last):
-            return [Signal(self.slug, "CE", f"Bull momentum cross (norm slope {norm:.3f})", sl, rr)]
+            return [Signal(self.slug, "CE", f"Bull momentum cross (norm slope {norm:.3f})", sl, rr, confidence=65)]
         if prev_norm >= -thr > norm and c[-1] < e[-1] and not _green(last):
-            return [Signal(self.slug, "PE", f"Bear momentum cross (norm slope {norm:.3f})", sl, rr)]
+            return [Signal(self.slug, "PE", f"Bear momentum cross (norm slope {norm:.3f})", sl, rr, confidence=65)]
         return []
 
 
@@ -259,10 +259,10 @@ class SwingKingSniper(Strategy):
         touched_low = min(float(x["low"]) for x in u[-3:]) <= e20[-1]
         touched_high = max(float(x["high"]) for x in u[-3:]) >= e20[-1]
         if e20[-1] > e50[-1] and rising and touched_low and _green(last) and float(last["close"]) > float(prev["high"]):
-            return [Signal(self.slug, "CE", "Strong uptrend pullback (20>50 EMA rising)", sl, rr,
+            return [Signal(self.slug, "CE", "Strong uptrend pullback (20>50 EMA rising)", sl, rr, confidence=95,
                            max_hold_bars=self.params.get("max_hold_bars", 48))]
         if e20[-1] < e50[-1] and falling and touched_high and not _green(last) and float(last["close"]) < float(prev["low"]):
-            return [Signal(self.slug, "PE", "Strong downtrend pullback (20<50 EMA falling)", sl, rr,
+            return [Signal(self.slug, "PE", "Strong downtrend pullback (20<50 EMA falling)", sl, rr, confidence=95,
                            max_hold_bars=self.params.get("max_hold_bars", 48))]
         return []
 

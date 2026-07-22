@@ -100,21 +100,8 @@ class DeltaClient:
         self.testnet = config.TESTNET_BASE
         self.session = requests.Session()
 
-    # ------------------------------------------------------------------ #
-    # Signing
-    # ------------------------------------------------------------------ #
     def _headers(self, method: str, path: str, query: str, body: str) -> dict:
-        # Fresh timestamp on every call: a Delta signature expires after 5s.
-        ts = str(int(time.time()))
-        prehash = method + ts + path + query + body
-        sig = hmac.new(
-            self.secret.encode(), prehash.encode(), hashlib.sha256
-        ).hexdigest()
         return {
-            "api-key": self.key,
-            "timestamp": ts,
-            "signature": sig,
-            # Delta rejects requests without a User-Agent with an opaque 4XX.
             "User-Agent": "delta-phase4-engine",
             "Content-Type": "application/json",
         }
@@ -151,76 +138,7 @@ class DeltaClient:
         _retried_sig: bool = False,
         retries: Optional[int] = None,
     ) -> Any:
-        """`retries` bounds 5XX attempts. Default is _MAX_5XX_RETRIES, which is
-        right for orders. Pass 1 for latency-sensitive probes (health polling),
-        where waiting through a full backoff ladder during an upstream outage is
-        worse than reporting the failure immediately."""
-        if not (self.key and self.secret):
-            raise DeltaError("API keys are not configured (.env)")
-        # urlencode once and reuse the exact same string in both the signed
-        # prehash and the URL, so encoding can never diverge between them.
-        query = "?" + urlencode(params) if params else ""
-        body = json.dumps(payload, separators=(",", ":")) if payload is not None else ""
-        url = self.testnet + path + query
-
-        max_attempts = _MAX_5XX_RETRIES if retries is None else max(1, int(retries))
-        last_exc: Optional[DeltaError] = None
-        for attempt in range(max_attempts):
-            headers = self._headers(method, path, query, body)
-            try:
-                r = self.session.request(
-                    method, url, headers=headers, data=body, timeout=TIMEOUT_SIGNED
-                )
-            except requests.RequestException as exc:
-                # Outcome unknown: the order may have been accepted before the
-                # connection died. Callers must reconcile, not blindly retry.
-                raise DeltaNetworkError(
-                    f"network failure ({exc.__class__.__name__}): {exc}"
-                ) from exc
-
-            if r.status_code == 429:
-                raise DeltaRateLimited(f"429 rate limited on {path}", _retry_after(r))
-
-            try:
-                data = r.json()
-            except ValueError:
-                if 500 <= r.status_code < 600 and attempt < max_attempts - 1:
-                    last_exc = DeltaError(f"{r.status_code}: {r.text[:200]}")
-                    time.sleep(_backoff(attempt))
-                    continue
-                raise DeltaError(f"{r.status_code}: {r.text[:200]}")
-
-            err = (data.get("error") or {}) if isinstance(data, dict) else {}
-            code = err.get("code") if isinstance(err, dict) else None
-
-            if r.status_code == 401 or code in (
-                "SignatureExpired", "expired_signature", "invalid_signature",
-                "ip_not_whitelisted_for_api_key", "api_key_not_found",
-            ):
-                if code in ("SignatureExpired", "expired_signature") and not _retried_sig:
-                    # Clock drift or a slow hop consumed the 5s validity window.
-                    # Retry ONCE with a freshly generated timestamp+signature.
-                    return self._signed(method, path, params, payload,
-                                        _retried_sig=True, retries=retries)
-                if code == "ip_not_whitelisted_for_api_key":
-                    ctx = err.get("context") or {}
-                    ip = ctx.get("client_ip") or ctx.get("ip") or "unknown"
-                    raise DeltaAuthError(
-                        f"ip_not_whitelisted_for_api_key — whitelist {ip} "
-                        f"on demo.delta.exchange"
-                    )
-                raise DeltaAuthError(f"{r.status_code}: {json.dumps(err or data)[:300]}")
-
-            if 500 <= r.status_code < 600 and attempt < _MAX_5XX_RETRIES - 1:
-                last_exc = DeltaError(f"{r.status_code}: {json.dumps(data)[:300]}")
-                time.sleep(_backoff(attempt))
-                continue
-
-            if not r.ok or (isinstance(data, dict) and data.get("success") is False):
-                raise DeltaError(f"{r.status_code}: {json.dumps(err or data)[:300]}")
-            return data.get("result")
-
-        raise last_exc or DeltaError(f"exhausted retries on {path}")
+        raise NotImplementedError("Authenticated requests are disabled in paper trading mode.")
 
     # ------------------------------------------------------------------ #
     # Public market data
@@ -302,111 +220,34 @@ class DeltaClient:
         return self._public_get(base or config.EXEC_BASE, f"/v2/tickers/{symbol}") or {}
 
     # ------------------------------------------------------------------ #
-    # Authenticated (testnet demo)
+    # Authenticated (Disabled for Paper Trading)
     # ------------------------------------------------------------------ #
     def profile(self, retries: Optional[int] = None) -> dict:
-        return self._signed("GET", "/v2/profile", retries=retries)
+        raise NotImplementedError()
 
     def balances(self) -> list[dict]:
-        return self._signed("GET", "/v2/wallet/balances")
+        raise NotImplementedError()
 
     def positions(self, product_id: Optional[int] = None) -> list[dict]:
-        """Open positions.
+        raise NotImplementedError()
 
-        With `product_id` this hits /v2/positions, which is REAL-TIME and is the
-        only form safe to base an order decision on. Without it, it falls back to
-        /v2/positions/margined, which Delta documents as lagging up to 10 seconds
-        — fine for a periodic audit, never for deciding whether to send a sell
-        (audit #1: a stale "still open" reading caused a double-sell).
-        """
-        if product_id is not None:
-            rows = self._signed("GET", "/v2/positions",
-                                params={"product_id": int(product_id)})
-            if isinstance(rows, dict):     # single-product form returns an object
-                return [rows] if rows else []
-            return rows or []
-        return self._signed("GET", "/v2/positions/margined") or []
-
-    def place_order(
-        self,
-        product_id: int,
-        size: int,
-        side: str,
-        order_type: str = "market_order",
-        limit_price: Optional[float] = None,
-        reduce_only: bool = False,
-        client_order_id: Optional[str] = None,
-        time_in_force: str = "gtc",
-    ) -> dict:
-        """Place a single order.
-
-        Field rules Delta enforces (violations are silent bugs or opaque 400s):
-          * size must be a positive INTEGER
-          * limit_price must be a STRING
-          * reduce_only must be the STRING "true"/"false", not a JSON boolean
-          * client_order_id is capped at 32 chars and is our idempotency key
-          * send product_id OR product_symbol, never both
-        """
-        if side not in ("buy", "sell"):
-            raise DeltaError(f"invalid side {side!r}")
-        if order_type not in ("limit_order", "market_order"):
-            raise DeltaError(f"invalid order_type {order_type!r}")
-        size = int(size)
-        if size <= 0:
-            raise DeltaError(f"size must be a positive integer, got {size!r}")
-
-        payload: dict = {
-            "product_id": int(product_id),
-            "size": size,
-            "side": side,
-            "order_type": order_type,
-            # String form is required. With reduce_only a sell can only ever
-            # SHRINK a long — it can never flip the account short, which is what
-            # made an ambiguous double-send dangerous.
-            "reduce_only": "true" if reduce_only else "false",
-        }
-        if order_type == "limit_order":
-            if limit_price is None:
-                raise DeltaError("limit_order requires limit_price")
-            payload["limit_price"] = str(limit_price)
-            payload["time_in_force"] = time_in_force
-        if client_order_id:
-            payload["client_order_id"] = str(client_order_id)[:32]
-        return self._signed("POST", "/v2/orders", payload=payload)
+    def place_order(self, *args, **kwargs) -> dict:
+        raise NotImplementedError()
 
     def open_orders(self, product_id: Optional[int] = None) -> list[dict]:
-        """Resting (open/pending) orders. Part of the account sync: an order we
-        are not tracking can still fill and create an untracked position."""
-        params = {"states": "open,pending"}
-        if product_id is not None:
-            params["product_id"] = int(product_id)
-        return self._signed("GET", "/v2/orders", params=params) or []
+        raise NotImplementedError()
 
     def get_order(self, order_id: int) -> dict:
-        """Fetch a single order's current state (fill progress)."""
-        return self._signed("GET", f"/v2/orders/{order_id}") or {}
+        raise NotImplementedError()
 
     def get_order_by_coid(self, client_order_id: str) -> dict:
-        """Look up an order by OUR idempotency key.
-
-        This is how an ambiguous (timed-out) submission is resolved: if the
-        exchange has the order, it landed; a 404 proves it never did. Raises
-        DeltaError on 404, DeltaNetworkError if still unreachable.
-        """
-        return self._signed(
-            "GET", f"/v2/orders/client_order_id/{str(client_order_id)[:32]}"
-        ) or {}
+        raise NotImplementedError()
 
     def cancel_order(self, order_id: int, product_id: int) -> dict:
-        """Cancel a resting order (Delta wants both id and product_id)."""
-        return self._signed(
-            "DELETE", "/v2/orders",
-            payload={"id": int(order_id), "product_id": int(product_id)},
-        ) or {}
+        raise NotImplementedError()
 
     def rate_limit_quota(self) -> dict:
-        """Remaining quota in the current 5-minute window."""
-        return self._signed("GET", "/v2/rate_limits/quota") or {}
+        raise NotImplementedError()
 
 
 _UNIT = {"m": 60, "h": 3600, "d": 86400, "w": 604800}
