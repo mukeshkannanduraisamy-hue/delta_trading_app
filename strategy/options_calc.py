@@ -133,17 +133,34 @@ def calculate_options_order_params(symbol: str, direction: str, confidence: int,
     delta = abs(float(ticker["greeks"].get("delta", 0.5)))
     
     # ── FIX 2: THETA BUFFER & DTE ──────────────────────────────
+    ex_date = None
     try:
-        expiry_str = symbol.split("-")[3]
-        ex_date = datetime.strptime(expiry_str, "%d%m%y").replace(tzinfo=timezone.utc)
-        dte = (ex_date - datetime.now(timezone.utc)).days
+        tokens = symbol.split("-")
+        for tok in tokens:
+            if len(tok) == 6 and tok.isdigit():
+                day = int(tok[0:2])
+                month = int(tok[2:4])
+                year = 2000 + int(tok[4:6])
+                ex_date = datetime(year, month, day, 12, 0, 0, tzinfo=timezone.utc)
+                break
     except Exception:
-        dte = 0
+        ex_date = None
+
+    now_utc = datetime.now(timezone.utc)
+    if ex_date is None:
+        time_to_expiry_sec = 86400.0
+    else:
+        time_to_expiry_sec = (ex_date - now_utc).total_seconds()
+
+    hours_to_expiry = time_to_expiry_sec / 3600.0
+    dte_days = max(0.0, time_to_expiry_sec / 86400.0)
+    dte = dte_days
         
-    adv_params["dte"] = dte
+    adv_params["dte"] = round(dte_days, 1)
     
-    if dte <= 1:
-        raise AutoSkipTrade(f"TRADE BLOCKED: Option expires in {dte} days or less. Theta decay will destroy premium too fast.")
+    min_hours = getattr(config, "MIN_HOURS_TO_EXPIRY", 2.0)
+    if hours_to_expiry < min_hours:
+        raise AutoSkipTrade(f"TRADE BLOCKED: Option expires in {hours_to_expiry:.1f} hours (less than {min_hours}h minimum). Theta decay will destroy premium too fast.")
         
     daily_theta = abs(float(ticker["greeks"].get("theta", 0)))
     adv_params["daily_theta"] = daily_theta
@@ -156,9 +173,9 @@ def calculate_options_order_params(symbol: str, direction: str, confidence: int,
     elif dte >= 4 and dte <= 7:
         theta_days_multiplier = 2.0
         theta_warning = "Weekly option detected. Theta buffer increased to 2 days."
-    else: # 2-3
+    else:
         theta_days_multiplier = 3.0
-        theta_warning = f"CAUTION: Near expiry option (DTE: {dte}). Theta is accelerating. Buffer set to 3 days."
+        theta_warning = f"CAUTION: Near expiry option (DTE: {dte:.1f}d). Theta is accelerating. Buffer set to 3 days."
         
     adv_params["theta_days_multiplier"] = theta_days_multiplier
     adv_params["theta_warning"] = theta_warning

@@ -744,12 +744,11 @@ class Executor:
         if pos.max_hold_bars and age_bars >= pos.max_hold_bars:
             return self._close(pos, price, "time_exit")
             
-        # DTE < 3 Days rule
+        # Expiry settlement check
         try:
             d, m, y = pos.expiry.split("-")
-            ex_date = datetime(int(y), int(m), int(d), tzinfo=timezone.utc)
-            dte = (ex_date - datetime.now(timezone.utc)).days
-            if dte < -1:
+            ex_date = datetime(int(y), int(m), int(d), 12, 0, 0, tzinfo=timezone.utc)
+            if (ex_date - datetime.now(timezone.utc)).total_seconds() < 0:
                 return self._close(pos, price, "dte_exit")
         except Exception:
             pass
