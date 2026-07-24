@@ -231,7 +231,7 @@ def stochastic_rsi(values: list[float], rsi_period: int = 14, stoch_period: int 
     
     stoch_rsi: list[Optional[float]] = [None] * len(values)
     for i in range(len(values)):
-        if i >= rsi_period + stoch_period:
+        if i >= rsi_period + stoch_period - 1:
             window = rsi_vals[i - stoch_period + 1 : i + 1]
             if None not in window:
                 highest = max([x for x in window if x is not None])
@@ -467,18 +467,22 @@ def hma(values: list[float], period: int = 9) -> list[Optional[float]]:
     wma1 = wma(values, half_length)
     wma2 = wma(values, period)
     
-    diff_wma: list[float] = [0.0] * len(values)
+    diff_wma: list[Optional[float]] = [None] * len(values)
     for i in range(len(values)):
-        v1 = wma1[i] if wma1[i] is not None else 0.0
-        v2 = wma2[i] if wma2[i] is not None else 0.0
-        diff_wma[i] = 2.0 * v1 - v2
+        if wma1[i] is None or wma2[i] is None:
+            diff_wma[i] = None
+        else:
+            diff_wma[i] = 2.0 * wma1[i] - wma2[i]
         
     denom = sqrt_length * (sqrt_length + 1) / 2.0
     start_idx = period - 1 + sqrt_length - 1
     for i in range(start_idx, len(values)):
+        window = diff_wma[i - sqrt_length + 1 : i + 1]
+        if any(v is None for v in window):
+            continue
         val = 0.0
         for j in range(sqrt_length):
-            val += diff_wma[i - j] * (sqrt_length - j)
+            val += diff_wma[i - j] * (sqrt_length - j)  # type: ignore[operator]
         out[i] = val / denom
         
     return out

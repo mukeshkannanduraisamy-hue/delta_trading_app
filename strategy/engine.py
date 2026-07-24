@@ -26,7 +26,12 @@ _UNIT = {"m": 60, "h": 3600, "d": 86400, "w": 604800}
 
 
 def _bar_seconds(resolution: str) -> int:
-    return int(resolution[:-1]) * _UNIT.get(resolution[-1], 60)
+    if not resolution or resolution[-1] not in _UNIT:
+        raise ValueError(f"Unknown resolution: {resolution!r}")
+    try:
+        return int(resolution[:-1]) * _UNIT[resolution[-1]]
+    except (ValueError, IndexError) as e:
+        raise ValueError(f"Cannot parse resolution {resolution!r}: {e}") from e
 
 
 class Engine:
@@ -214,7 +219,8 @@ class Engine:
                     gate = int(now // bar_secs)
                     if self._last_eval.get(s.slug) == gate:
                         continue
-                    self._last_eval[s.slug] = gate
+                    if premium_cache.get(s.slug):  # only mark as evaluated if we got data
+                        self._last_eval[s.slug] = gate
                     ctx = Context(underlying=[], spot=spot, premium=premium_cache.get(s.slug, {}))
 
                 for sig in s.evaluate(ctx):
@@ -235,8 +241,16 @@ class Engine:
         journal.record("engine", {"event": "start", **config.summary()})
         while self.running:
             try:
-                await asyncio.to_thread(self._cycle)
-                self.last_error = None
+                try:
+                    await asyncio.wait_for(
+                        asyncio.to_thread(self._cycle),
+                        timeout=config.POLL_SECONDS * 10
+                    )
+                except asyncio.TimeoutError:
+                    self.last_error = "Engine cycle timed out — check exchange connectivity"
+                else:
+                    if not self.last_error:  # only clear if _cycle didn't set one
+                        self.last_error = None
                 self._rate_limited_until = 0.0
             except DeltaRateLimited as exc:
                 # Honour the exchange's own reset window. Retrying sooner just
@@ -307,9 +321,13 @@ class Engine:
             return False
         journal.record("engine", {"event": "start_armed", "mode": config.EXECUTION_MODE,
                                   "contracts": config.CONTRACTS,
-                                  "note": "PAPER TRADING — simulating orders internally"})
+                                  "note": "PAPER TRADING — simulating orders internally" if config.EXECUTION_MODE == "paper" else f"LIVE MODE — {config.EXECUTION_MODE}",})
         self.running = True
-        self._task = asyncio.create_task(self._run())
+        try:
+            self._task = asyncio.create_task(self._run())
+        except Exception:
+            self.running = False
+            raise
         return True
 
     async def stop(self, flatten: bool = False) -> None:

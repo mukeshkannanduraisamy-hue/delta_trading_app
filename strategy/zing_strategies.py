@@ -100,7 +100,7 @@ class TrafficLight(Strategy):
 
     def evaluate(self, ctx: Context) -> list[Signal]:
         u = ctx.underlying
-        if len(u) < 4:
+        if len(u) < 16:
             return []
         a, b, brk = u[-3], u[-2], u[-1]
         # Opposite-coloured pair.

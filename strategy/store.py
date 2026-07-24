@@ -68,6 +68,7 @@ def init_db() -> None:
         )
         c.execute("CREATE INDEX IF NOT EXISTS idx_trades_close ON trades(ts_close)")
         c.execute("CREATE INDEX IF NOT EXISTS idx_trades_strategy ON trades(strategy)")
+        c.execute("CREATE INDEX IF NOT EXISTS idx_trades_strat_close ON trades(strategy, ts_close DESC)")
         # Implied-vol snapshots — accumulates the forward series needed to test
         # the variance risk premium properly (IV today vs realized vol later).
         c.execute(
@@ -354,7 +355,8 @@ def strategies_seen() -> list[str]:
 # One-time backfill from the legacy JSONL journal so historical closes appear.
 # --------------------------------------------------------------------------- #
 def backfill_from_jsonl() -> int:
-    if count_trades() > 0:
+    sentinel = config.JOURNAL_DIR / ".backfill_done"
+    if sentinel.exists() or count_trades() > 0:
         return 0
     path = config.JOURNAL_DIR / "trades.jsonl"
     if not path.exists():
@@ -388,6 +390,7 @@ def backfill_from_jsonl() -> int:
                 "partial": 1 if e.get("kind") == "close_partial" else 0,
             })
             n += 1
+    sentinel.touch()
     return n
 
 

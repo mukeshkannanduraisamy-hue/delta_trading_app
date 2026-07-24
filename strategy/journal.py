@@ -15,6 +15,7 @@ class Journal:
     def __init__(self, maxlen: int = 500) -> None:
         self.events: deque = deque(maxlen=maxlen)
         self.path = config.JOURNAL_DIR / "trades.jsonl"
+        config.JOURNAL_DIR.mkdir(parents=True, exist_ok=True)
         # record() runs on the engine worker thread while recent() serves API
         # requests from the event loop — guard the deque against concurrent
         # mutation-during-iteration.
