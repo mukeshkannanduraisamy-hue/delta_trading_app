@@ -167,7 +167,7 @@ def normalize_candle(raw: dict) -> dict:
     Charts expects the bar `time` in whole seconds.
     """
     start_us = raw.get("candle_start_time")
-    time_s = int(start_us / 1_000_000) if start_us else None
+    time_s = int(start_us / 1_000_000) if start_us is not None else None
     return {
         "type": "candle",
         "symbol": raw.get("symbol"),
@@ -187,7 +187,9 @@ def normalize_trade(raw: dict, symbol: str | None = None) -> dict:
     The market aggressor is the taker: buyer_role == 'taker' -> BUY (green),
     seller_role == 'taker' -> SELL (red).
     """
-    side = "buy" if raw.get("buyer_role") == "taker" else "sell"
+    side = "buy" if raw.get("buyer_role") == "taker" else (
+        "sell" if raw.get("seller_role") == "taker" else "unknown"
+    )
     return {
         "symbol": raw.get("symbol") or symbol,
         "price": _fnum(raw.get("price")),
@@ -287,6 +289,8 @@ async def _handle_upstream_message(message) -> None:
     mtype = raw.get("type", "")
 
     if mtype == "v2/ticker":
+        if not raw.get("symbol"):
+            return
         # Publish EVERY ticker (underlyings and options) to the in-memory bus —
         # this is what makes engine reads instant and what the option chain
         # streams from. It happens before any broadcast so a slow browser can
@@ -726,21 +730,19 @@ async def engine_reconciler() -> None:
     order (exits first, always). It never opens anything.
     """
     while True:
-        await asyncio.sleep(strat_config.ACCOUNT_SYNC_SECONDS * 2)
         try:
-            if engine.running:
-                continue          # the engine's own cycle is already doing it
+            if not engine.running:
+                def _tick():
+                    # Exits FIRST — same invariant as Engine._cycle.
+                    engine.executor.manage()
+                    engine.executor.reconcile()
 
-            def _tick():
-                # Exits FIRST — same invariant as Engine._cycle.
-                engine.executor.manage()
-                engine.executor.reconcile()
-
-            await asyncio.to_thread(_tick)
+                await asyncio.to_thread(_tick)
         except asyncio.CancelledError:
             raise
         except Exception as exc:  # noqa: BLE001
             print(f"[reconciler] {exc!r}")
+        await asyncio.sleep(strat_config.ACCOUNT_SYNC_SECONDS * 2)
 
 
 async def health_publisher() -> None:
@@ -803,10 +805,11 @@ async def lifespan(app: FastAPI):
     try:
         yield
     finally:
-        await engine.stop()
         # A process exit used to leave real testnet positions with no manager
         # watching their stops, and said nothing about it (audit #12).
+        # Capture open positions BEFORE stopping the engine so the list is valid.
         open_now = await asyncio.to_thread(engine.executor.snapshots_blocking)
+        await engine.stop()
         if open_now:
             # Live-only: every open position is a real exchange position, so
             # leaving one behind means it rides with no manager watching its stop.
@@ -1050,8 +1053,9 @@ async def api_option_chain(asset: str = "BTC", expiry: str = ""):
         side = build_option_side(t)
         if t.get("contract_type") == "call_options":
             entry["call"] = side
-        else:
+        elif t.get("contract_type") == "put_options":
             entry["put"] = side
+        # skip unknowns (futures, etc.)
 
     strike_list = sorted(strikes.values(), key=lambda e: e["strike"])
 
@@ -1404,7 +1408,8 @@ async def api_preview_confidence(symbol: str, side: str, confidence: int = 50):
     if not quote:
         return JSONResponse(status_code=400, content={"error": "No tradable option found for current spot price."})
         
-    virtual_balance = account_sync.snapshot().get("equity_usd", 10000.0)
+    snap = account_sync.snapshot()
+    virtual_balance = snap.get("equity_usd", 10000.0)
     
     try:
         adv_params = calculate_options_order_params(quote.symbol, side.upper(), confidence, virtual_balance)
@@ -1428,7 +1433,7 @@ async def api_preview_confidence(symbol: str, side: str, confidence: int = 50):
         "margin": margin,
         "tier": tier,
         "contract_value": quote.contract_value,
-        "available_usd": account_sync.snapshot().get("available_usd", 0),
+        "available_usd": snap.get("available_usd", 0),
         "adv_params": adv_params
     }
 
@@ -1437,7 +1442,10 @@ async def api_order_place(request: Request):
     data = await request.json()
     symbol = data.get("symbol", "BTCUSD")
     side = data.get("side", "CE")
-    confidence = int(data.get("confidence", 50))
+    try:
+        confidence = int(data.get("confidence", 50))
+    except (ValueError, TypeError):
+        confidence = 50
     
     def do_trade():
         from strategy.pricebus import bus

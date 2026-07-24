@@ -259,6 +259,9 @@ class Executor:
         # lock. Async callers read this instead of acquiring the lock — see
         # snapshots().
         self._snapshot_cache: list[dict] = []
+        self.last_sl_tp_check: float = 0.0
+        self.last_theta_check: float = 0.0
+        self.last_greeks_refresh: float = 0.0
 
     # ------------------------------------------------------------------ #
     def _key(self, strategy: str, direction: str) -> str:
@@ -523,7 +526,7 @@ class Executor:
         exit_fee = _fees_or_cap(exit_price, pos.contract_value, contracts, spot=_spot())
         entry_fee_part = pos.entry_fee * frac
         net = gross - entry_fee_part - exit_fee
-        self.session_equity += gross - exit_fee
+        self.session_equity += gross - exit_fee - entry_fee_part
         self.realized_pnl += net
         
         from .account import sync
@@ -605,7 +608,7 @@ class Executor:
     def _refresh_greeks(self):
         for pos in list(self.positions.values()):
             try:
-                ticker = self.resolver.client.ticker(pos.symbol)
+                ticker = client.ticker(pos.symbol)
                 if ticker and "greeks" in ticker:
                     daily_theta = abs(float(ticker["greeks"].get("theta", 0)))
                     pos.meta["daily_theta"] = daily_theta

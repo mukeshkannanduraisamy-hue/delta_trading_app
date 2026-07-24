@@ -54,15 +54,16 @@ class AccountSync:
         self._snap.update({
             "synced_at": time.time(),
             "equity_usd": self.virtual_balance,
-            "available_usd": self.virtual_balance - self.used_margin,
-            "balances": [{"asset": "USDT", "balance": self.virtual_balance, "available": self.virtual_balance - self.used_margin}],
+            "available_usd": max(0.0, self.virtual_balance - self.used_margin),
+            "balances": [{"asset": "USDT", "balance": self.virtual_balance, "available": max(0.0, self.virtual_balance - self.used_margin)}],
         })
 
     def refresh(self) -> dict:
         # In paper mode, refresh just returns the latest simulated snapshot.
-        self.syncs += 1
         with self._lock:
+            self.syncs += 1
             self._snap["syncs"] = self.syncs
+            self._update_snap()
             return dict(self._snap)
 
 

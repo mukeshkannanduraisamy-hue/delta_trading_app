@@ -1,5 +1,6 @@
 import json
 import os
+import threading
 from pathlib import Path
 from typing import Dict, Any
 
@@ -25,47 +26,58 @@ DEFAULT_SETTINGS = {
 
 class SettingsManager:
     def __init__(self):
+        self._lock = threading.Lock()
         self._settings = dict(DEFAULT_SETTINGS)
         self.load()
 
     def load(self) -> None:
-        if SETTINGS_PATH.exists():
+        with self._lock:
             try:
-                with open(SETTINGS_PATH, "r", encoding="utf-8") as f:
-                    data = json.load(f)
-                    for k, v in data.items():
-                        if k in self._settings:
+                data = json.loads(self.path.read_text() if hasattr(self, 'path') else SETTINGS_PATH.read_text())
+                for k, v in data.items():
+                    if k in self._settings:
+                        try:
+                            if isinstance(DEFAULT_SETTINGS[k], int):
+                                v = int(v)
+                            elif isinstance(DEFAULT_SETTINGS[k], float):
+                                v = float(v)
                             self._settings[k] = v
-            except Exception as e:
-                print(f"[settings] failed to load settings.json: {e}")
-        else:
-            self.save()
+                        except (ValueError, TypeError):
+                            pass
+            except (FileNotFoundError, json.JSONDecodeError):
+                self.save()
 
     def save(self) -> None:
         try:
-            with open(SETTINGS_PATH, "w", encoding="utf-8") as f:
+            path = self.path if hasattr(self, 'path') else SETTINGS_PATH
+            with open(path, "w", encoding="utf-8") as f:
                 json.dump(self._settings, f, indent=4)
         except Exception as e:
             print(f"[settings] failed to save settings.json: {e}")
 
     def get(self, key: str) -> Any:
-        return self._settings.get(key, DEFAULT_SETTINGS.get(key))
+        with self._lock:
+            return self._settings.get(key, DEFAULT_SETTINGS.get(key))
 
     def update(self, new_settings: Dict[str, Any]) -> None:
-        changed = False
+        validated = {}
         for k, v in new_settings.items():
-            if k in self._settings:
-                # Type cast based on default
+            if k not in self._settings:
+                continue
+            try:
                 if isinstance(DEFAULT_SETTINGS[k], int):
                     v = int(v)
                 elif isinstance(DEFAULT_SETTINGS[k], float):
                     v = float(v)
-                self._settings[k] = v
-                changed = True
-        if changed:
+                validated[k] = v
+            except (ValueError, TypeError):
+                pass
+        with self._lock:
+            self._settings.update(validated)
             self.save()
 
     def all(self) -> Dict[str, Any]:
-        return dict(self._settings)
+        with self._lock:
+            return dict(self._settings)
 
 manager = SettingsManager()

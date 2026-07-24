@@ -133,7 +133,7 @@ class OptionResolver:
         out: dict[str, OptionQuote] = {}
         # Ask the WS feed to stream these contracts so their premiums arrive
         # live rather than being polled once we hold a position in them.
-        bus.want(*[t.get("symbol") for t in (pair.get("call"), pair.get("put")) if t])
+        bus.want(*[s for s in [t.get("symbol") for t in (pair.get("call"), pair.get("put")) if t] if s])
         for side, key in (("CE", "call"), ("PE", "put")):
             t = pair.get(key)
             if not t:
@@ -148,16 +148,19 @@ class OptionResolver:
             cv = _f(prod.get("contract_value"))
             if not cv or cv <= 0:
                 continue
+            strike_val = _f(prod.get("strike_price"))
+            if strike_val is None or strike_val <= 0:
+                continue  # refuse quote with missing strike — avoids settlement value corruption
             out[side] = OptionQuote(
                 symbol=sym,
                 product_id=int(prod.get("id") or t.get("product_id") or 0),
-                strike=atm_strike,
+                strike=strike_val,
                 side=side,
                 best_bid=_f(q.get("best_bid")),
                 best_ask=_f(q.get("best_ask")),
                 mark_price=_f(t.get("mark_price")),
                 contract_value=cv,
-                tick_size=_f(prod.get("tick_size")) or 0.5,
+                tick_size=(_f(prod.get("tick_size")) if _f(prod.get("tick_size")) is not None else 0.5),
                 expiry=expiry,
             )
         return out
@@ -205,11 +208,15 @@ class OptionResolver:
                 pass
         bus.want(sym)   # stream it from now on so its stop reacts on the tick
 
+        strike_val = _f(prod.get("strike_price"))
+        if strike_val is None or strike_val <= 0:
+            return None
+
         return OptionQuote(
             symbol=sym, product_id=int(product_id),
-            strike=_f(prod.get("strike_price")) or 0.0, side=side,
+            strike=strike_val, side=side,
             best_bid=bid, best_ask=ask, mark_price=mark,
-            contract_value=cv, tick_size=_f(prod.get("tick_size")) or 0.5,
+            contract_value=cv, tick_size=(_f(prod.get("tick_size")) if _f(prod.get("tick_size")) is not None else 0.5),
             expiry=expiry,
         )
 

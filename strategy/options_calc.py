@@ -191,6 +191,9 @@ def calculate_options_order_params(symbol: str, direction: str, confidence: int,
     if smart_entry == 0:
         smart_entry = float(ticker.get("mark_price", 0))
         
+    if smart_entry <= 0:
+        raise ValueError(f"Cannot determine entry price for {symbol} — mark_price also unavailable")
+        
     if smart_entry > 0 and (theta_buffer / smart_entry) * 100 > 25:
         warn = f"Theta buffer is {((theta_buffer/smart_entry)*100):.1f}% of premium. Time decay risk is very high."
         warnings.append(warn)
@@ -207,8 +210,11 @@ def calculate_options_order_params(symbol: str, direction: str, confidence: int,
     atr_1h = calculate_atr(c1h, 14)
     atr_4h = calculate_atr(c4h, 14)
     
+    if spot <= 0:
+        raise ValueError(f"Spot price unavailable or zero for {symbol}")
     if atr_15m == 0: atr_15m = spot * 0.005
     if atr_1h == 0: atr_1h = spot * 0.010
+    if atr_4h == 0: atr_4h = spot * 0.020
     
     sl_atr = max(atr_1h, atr_15m * 4)
     
@@ -231,7 +237,11 @@ def calculate_options_order_params(symbol: str, direction: str, confidence: int,
     elif "quotes" in ticker and ticker["quotes"].get("mark_iv") is not None:
         current_iv = float(ticker["quotes"]["mark_iv"])
         
-    ivr = ((current_iv - DEFAULT_IV_LOW) / (DEFAULT_IV_HIGH - DEFAULT_IV_LOW)) * 100
+    if current_iv > 0:
+        ivr = ((current_iv - DEFAULT_IV_LOW) / (DEFAULT_IV_HIGH - DEFAULT_IV_LOW)) * 100
+        ivr = max(0.0, min(100.0, ivr))
+    else:
+        ivr = 0.0  # IV unavailable — use lowest tier
     
     iv_regime = ""
     iv_warning = None
@@ -312,6 +322,7 @@ def calculate_options_order_params(symbol: str, direction: str, confidence: int,
         final_option_sl = smart_entry - max_sl_distance
         warnings.append("90% hard stop applied.")
         
+    final_option_sl = max(0.01, final_option_sl)  # never negative
     adv_params["final_sl"] = final_option_sl
     
     # ── FIX 5: DTE-SCALED TP RATIOS ─────────────────────────────
@@ -335,6 +346,9 @@ def calculate_options_order_params(symbol: str, direction: str, confidence: int,
     adv_params["tp1_ratio"], adv_params["tp2_ratio"], adv_params["tp3_ratio"] = tp_ratios
     
     risk = smart_entry - final_option_sl
+    if risk <= 0:
+        warnings.append(f"WARNING: Risk is non-positive ({risk:.4f}) — SL is at or above entry. Using 10% minimum.")
+        risk = smart_entry * 0.10
     raw_tp1 = smart_entry + (risk * tp_ratios[0])
     raw_tp2 = smart_entry + (risk * tp_ratios[1])
     raw_tp3 = smart_entry + (risk * tp_ratios[2])
@@ -396,9 +410,9 @@ def calculate_options_order_params(symbol: str, direction: str, confidence: int,
         "smart_entry": smart_entry,
         "btc_sl_price": btc_sl_price,
         "option_sl_price": final_option_sl,
-        "option_tp1": final_tp1 if tp1_achievable else raw_tp1,
-        "option_tp2": final_tp2 if final_tp2 else raw_tp2,
-        "option_tp3": final_tp3 if final_tp3 else raw_tp3,
+        "option_tp1": final_tp1 if tp1_achievable else None,
+        "option_tp2": final_tp2,  # already None when not achievable
+        "option_tp3": final_tp3,
         "btc_tp1": btc_tp1,
         "btc_tp2": btc_tp2,
         "btc_tp3": btc_tp3,

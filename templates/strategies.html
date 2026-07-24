@@ -163,7 +163,7 @@
       <table class="t"><thead><tr>
         <th>Strategy</th><th>Side</th><th>Symbol</th><th>Strike</th><th>Conf</th><th>Lots</th><th>Lev</th>
         <th>Entry</th><th>Now</th><th>Target</th><th>Stop</th><th>uPnL</th><th>Age</th>
-      </tr></thead><tbody id="pos-body"><tr><td colspan="10" class="empty">No open positions.</td></tr></tbody></table>
+      </tr></thead><tbody id="pos-body"><tr><td colspan="13" class="empty">No open positions.</td></tr></tbody></table>
     </div>
   </div>
 
@@ -557,7 +557,7 @@
 </div>
 
 <!-- Settings Modal -->
-<div class="modal-overlay" id="settings-modal">
+<div class="modal-overlay" id="settings-modal" onclick="if(event.target===this)this.style.display='none'">
   <div class="modal">
     <h3>Configuration Settings</h3>
     <div style="display:flex; gap:15px;">

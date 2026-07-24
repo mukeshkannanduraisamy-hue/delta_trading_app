@@ -12,44 +12,39 @@ overwhelmed UI can never stall the trading loop.
 
 from __future__ import annotations
 
-import queue
+import collections
+import threading
 import time
 
 
 class EventBus:
     def __init__(self, maxsize: int = 2000) -> None:
-        self._q: queue.Queue = queue.Queue(maxsize=maxsize)
+        self._q: collections.deque = collections.deque(maxlen=maxsize)
+        self._lock = threading.Lock()
         self.published = 0
         self.dropped = 0
 
     def publish(self, topic: str, data) -> None:
         """Safe to call from ANY thread. Never blocks, never raises."""
         evt = {"topic": topic, "data": data, "ts": time.time()}
-        try:
-            self._q.put_nowait(evt)
+        with self._lock:
+            if len(self._q) == self._q.maxlen:
+                self.dropped += 1
+            self._q.append(evt)
             self.published += 1
-        except queue.Full:
-            try:                       # drop oldest, keep newest
-                self._q.get_nowait()
-                self.dropped += 1
-                self._q.put_nowait(evt)
-                self.published += 1
-            except (queue.Empty, queue.Full):
-                self.dropped += 1
 
     def drain(self, max_items: int = 500) -> list[dict]:
         """Called from the event loop; returns everything queued so far."""
-        out: list[dict] = []
-        while len(out) < max_items:
-            try:
-                out.append(self._q.get_nowait())
-            except queue.Empty:
-                break
-        return out
+        with self._lock:
+            items = list(self._q)
+            self._q.clear()
+        return items[:max_items]
 
     def stats(self) -> dict:
+        with self._lock:
+            queued = len(self._q)
         return {"published": self.published, "dropped": self.dropped,
-                "queued": self._q.qsize()}
+                "queued": queued}
 
 
 bus = EventBus()

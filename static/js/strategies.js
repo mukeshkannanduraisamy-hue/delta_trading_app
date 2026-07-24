@@ -124,10 +124,13 @@ function resetDecisionCounters() {
 
 function scheduleMidnightReset() {
   const now = new Date();
-  const midnight = new Date();
-  midnight.setHours(24, 0, 0, 0);
-
-  const msUntilMidnight = midnight - now;
+  // IST is UTC+5:30
+  const istOffset = 5.5 * 60 * 60 * 1000;
+  const nowIST = new Date(now.getTime() + istOffset);
+  const nextMidnightIST = new Date(nowIST);
+  nextMidnightIST.setUTCHours(18, 30, 0, 0); // 18:30 UTC = 00:00 IST
+  if (nextMidnightIST <= now) nextMidnightIST.setUTCDate(nextMidnightIST.getUTCDate() + 1);
+  const msUntilMidnight = nextMidnightIST.getTime() - now.getTime();
 
   setTimeout(function() {
     resetDecisionCounters();
@@ -163,8 +166,10 @@ window.resetDecisionCounters = resetDecisionCounters;
       ? "—" : money(s.available_usd);
 
     const pnlEl = $("s-pnl");
-    pnlEl.textContent = money(s.realized_pnl);
-    pnlEl.className = "v " + (s.realized_pnl > 0 ? "pos" : s.realized_pnl < 0 ? "neg" : "");
+    if (pnlEl) {
+      pnlEl.textContent = money(s.realized_pnl);
+      pnlEl.className = "v " + (s.realized_pnl > 0 ? "pos" : s.realized_pnl < 0 ? "neg" : "");
+    }
 
     $("s-winrate").textContent = s.win_rate === null || s.win_rate === undefined ? "—" : s.win_rate + "%";
     $("s-open").textContent = s.open_positions ?? 0;
@@ -202,6 +207,10 @@ window.resetDecisionCounters = resetDecisionCounters;
       headers: { "Content-Type": "application/json" },
       body: body ? JSON.stringify(body) : undefined,
     });
+    if (!r.ok) {
+      const text = await r.text();
+      throw new Error(`HTTP ${r.status}: ${text.slice(0, 200)}`);
+    }
     return r.json();
   }
 
@@ -263,7 +272,7 @@ window.resetDecisionCounters = resetDecisionCounters;
   function renderPositions(positions) {
     const body = $("pos-body");
     if (!positions || !positions.length) {
-      body.innerHTML = `<tr><td colspan="10" class="empty">No open positions.</td></tr>`;
+      body.innerHTML = `<tr><td colspan="13" class="empty">No open positions.</td></tr>`;
       return;
     }
     body.innerHTML = positions
@@ -513,17 +522,27 @@ window.resetDecisionCounters = resetDecisionCounters;
       "  size            : " + n + " contract(s) per trade\n" +
       "  strategies armed: " + enabled + "\n\n" +
       "Continue?")) return;
-    const res = await post("/api/strategy/start");
-    if (res && res.started === false) {
-      // The backend runs a credential preflight and refuses if it cannot
-      // trade — surface that instead of silently leaving the engine stopped.
-      alert("Engine did NOT start.\n\n" + (res.blocked_reason || "unknown reason"));
+    try {
+      const res = await post("/api/strategy/start");
+      if (res && res.started === false) {
+        // The backend runs a credential preflight and refuses if it cannot
+        // trade — surface that instead of silently leaving the engine stopped.
+        alert("Engine did NOT start.\n\n" + (res.blocked_reason || "unknown reason"));
+      }
+    } catch (err) {
+      alert("Start failed: " + err.message);
     }
     refresh();
   });
-  $("btn-stop").addEventListener("click", async () => { await post("/api/strategy/stop"); refresh(); });
+  $("btn-stop").addEventListener("click", async () => {
+    try { await post("/api/strategy/stop"); } catch (err) { alert("Stop failed: " + err.message); }
+    refresh();
+  });
   $("btn-flatten").addEventListener("click", async () => {
-    if (confirm("Close all open positions now?")) { await post("/api/strategy/flatten"); refresh(); }
+    if (confirm("Close all open positions now?")) {
+      try { await post("/api/strategy/flatten"); } catch (err) { alert("Flatten failed: " + err.message); }
+      refresh();
+    }
   });
   $("btn-acct").addEventListener("click", loadAccount);
 
@@ -551,10 +570,13 @@ window.resetDecisionCounters = resetDecisionCounters;
     list.forEach(data => {
       const eventType = data.kind;
       
-      // Every options_pre_trade event = 1 signal scanned
+      // Every options_pre_trade event = 1 signal scanned (not yet confirmed executed)
       if (eventType === 'options_pre_trade') {
         decisionCounters.scanned++;
-        // If an option pre trade arrives, the position is executing
+      }
+      
+      // Confirmed open (fill) = 1 executed
+      if (eventType === 'open') {
         decisionCounters.executed++;
       }
       
@@ -612,17 +634,17 @@ window.resetDecisionCounters = resetDecisionCounters;
       const res = await fetch("/api/settings");
       if (!res.ok) return;
       const data = await res.json();
-      $("set-max-lot").value = data.max_lot_size || 10;
-      $("set-max-lev").value = data.max_leverage_cap || 20;
-      $("set-start-bal").value = data.starting_virtual_balance || 100000;
-      $("set-loss-lim").value = data.daily_loss_limit_pct || 20;
-      $("set-max-pos").value = data.max_open_positions || 5;
+      $("set-max-lot").value = data.max_lot_size ?? 10;
+      $("set-max-lev").value = data.max_leverage_cap ?? 20;
+      $("set-start-bal").value = data.starting_virtual_balance ?? 100000;
+      $("set-loss-lim").value = data.daily_loss_limit_pct ?? 20;
+      $("set-max-pos").value = data.max_open_positions ?? 5;
       
-      $("set-lot-vlow").value = data.lot_pct_very_low || 10; $("set-lev-vlow").value = data.leverage_very_low || 2;
-      $("set-lot-low").value = data.lot_pct_low || 25; $("set-lev-low").value = data.leverage_low || 5;
-      $("set-lot-med").value = data.lot_pct_medium || 50; $("set-lev-med").value = data.leverage_medium || 10;
-      $("set-lot-high").value = data.lot_pct_high || 75; $("set-lev-high").value = data.leverage_high || 15;
-      $("set-lot-vhigh").value = data.lot_pct_very_high || 100; $("set-lev-vhigh").value = data.leverage_very_high || 20;
+      $("set-lot-vlow").value = data.lot_pct_very_low ?? 10; $("set-lev-vlow").value = data.leverage_very_low ?? 2;
+      $("set-lot-low").value = data.lot_pct_low ?? 25; $("set-lev-low").value = data.leverage_low ?? 5;
+      $("set-lot-med").value = data.lot_pct_medium ?? 50; $("set-lev-med").value = data.leverage_medium ?? 10;
+      $("set-lot-high").value = data.lot_pct_high ?? 75; $("set-lev-high").value = data.leverage_high ?? 15;
+      $("set-lot-vhigh").value = data.lot_pct_very_high ?? 100; $("set-lev-vhigh").value = data.leverage_very_high ?? 20;
     } catch (e) {
       console.error("failed to load settings", e);
     }
@@ -655,7 +677,11 @@ window.resetDecisionCounters = resetDecisionCounters;
       lot_pct_very_high: parseInt($("set-lot-vhigh").value),
       leverage_very_high: parseInt($("set-lev-vhigh").value)
     };
-    await post("/api/settings", payload);
+    try {
+      await post("/api/settings", payload);
+    } catch (err) {
+      alert("Save settings failed: " + err.message);
+    }
     $("settings-modal").style.display = "none";
   });
 

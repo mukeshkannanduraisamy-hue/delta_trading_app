@@ -125,9 +125,13 @@ class DeltaClient:
             raise DeltaError(f"{path}: non-JSON response {r.text[:200]}")
         # A 200 with success:false is still a failure — returning .get("result")
         # blindly would hand callers None and look like "no data".
-        if isinstance(data, dict) and data.get("success") is False:
-            raise DeltaError(f"{path}: {json.dumps(data.get('error', data))[:300]}")
-        return data.get("result")
+        if isinstance(data, list):
+            return data
+        if not isinstance(data, dict):
+            return data
+        if data.get("success") is False:
+            raise DeltaError(f"{url}: {data.get('error', data)}")
+        return data.get("result", data)
 
     def _signed(
         self,
