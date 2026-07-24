@@ -16,7 +16,11 @@ from .journal import journal
 class AccountSync:
     def __init__(self) -> None:
         self._lock = threading.Lock()
-        self.virtual_balance = config.SESSION_EQUITY_BASE
+        # config.starting_balance() is the single source of truth (settings'
+        # starting_virtual_balance) — see its docstring for why this must not
+        # read SESSION_EQUITY_BASE directly (audit fix D1: that used to diverge
+        # from the daily-loss-limit threshold, so the limit could never trip).
+        self.virtual_balance = config.starting_balance()
         # Track used margin. (margin = premium = entry_price * contracts * contract_value)
         self.used_margin = 0.0
 

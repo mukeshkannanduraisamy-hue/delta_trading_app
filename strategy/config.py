@@ -83,13 +83,45 @@ ENABLED_STRATEGIES = os.getenv(
 # balance comes from GET /api/account, which reads the exchange directly.
 SESSION_EQUITY_BASE = _env_float("SESSION_EQUITY_BASE",
                                   _env_float("PAPER_START_BALANCE", 10000.0))
-# Back-compat alias: store.performance() uses this as the equity-curve origin.
+# Back-compat alias / hard fallback for starting_balance() below.
 PAPER_START_BALANCE = SESSION_EQUITY_BASE
 
-# Delta taker fee for options: 0.03% of notional, capped at 3.5% of premium,
-# plus 18% GST. Applied to paper P&L so results are realistic (matches the
-# fee model verified in the earlier autotrader backtests).
-FEE_NOTIONAL_RATE = 0.0003
+
+def starting_balance() -> float:
+    """Single source of truth for the paper account's starting balance (USD).
+
+    Everything that needs "the starting balance" — the simulated wallet
+    (account.py), the session equity line (executor), the daily-loss-limit
+    threshold, and the performance equity-curve origin (store) — reads THIS, so
+    they can never disagree.
+
+    It returns the user-configurable `starting_virtual_balance` from settings,
+    the same number the UI settings modal edits. Before audit fix D1 the wallet
+    and equity curve read SESSION_EQUITY_BASE (10k) while the loss limit measured
+    against settings (100k), so a 50%%-of-100k threshold could never trip on a
+    10k wallet — the safety net was dead. Falls back to SESSION_EQUITY_BASE only
+    if settings is somehow unreadable. Lazy import mirrors executor's pattern and
+    keeps this very-early module free of an import-order dependency on settings.
+    """
+    try:
+        from .settings import manager
+        val = float(manager.get("starting_virtual_balance"))
+        if val > 0:
+            return val
+    except Exception:  # noqa: BLE001 — a config read must never crash a caller
+        pass
+    return SESSION_EQUITY_BASE
+
+# Delta options taker fee: min(taker_commission_rate * spot notional,
+# premium_commission_rate * premium) + 18% GST. These are FALLBACK defaults —
+# the live per-contract rates are read from /v2/products and threaded through
+# OptionQuote, because they can differ per contract. Verified live 2026-07-24:
+# products carry taker_commission_rate=0.0001 (0.01%) and product_specs.
+# premium_commission_rate=0.035 (3.5%). The old FEE_NOTIONAL_RATE default of
+# 0.0003 was 3x the real taker rate and overstated the notional leg of every
+# fee. GST stays ON: Indian exchanges levy 18% GST on commission, and
+# understating simulated fees is exactly what inverts an edge verdict.
+FEE_NOTIONAL_RATE = 0.0001
 FEE_PREMIUM_CAP = 0.035
 GST_RATE = 0.18
 
@@ -180,7 +212,9 @@ def summary() -> dict:
         "exec_base": EXEC_BASE,
         "live_only": False,
         "paper_mode_available": True,
-        "session_equity_base": SESSION_EQUITY_BASE,
+        # The actual starting balance in effect (audit fix D1) — was the fixed
+        # env constant, which no longer matches what account.py/executor.py use.
+        "session_equity_base": starting_balance(),
         "has_keys": bool(API_KEY and API_SECRET),
         "entry_order_type": ENTRY_ORDER_TYPE,
         "limit_anchor": LIMIT_ANCHOR,

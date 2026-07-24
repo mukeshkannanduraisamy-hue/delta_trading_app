@@ -56,35 +56,44 @@ def _coid(direction: str) -> str:
 
 
 def _fees(price: float, contract_value: float, contracts: int,
-          spot: float = 0.0) -> Optional[float]:
-    """Delta options taker fee: min(0.03% of notional, 3.5% of premium) + 18% GST.
+          spot: float = 0.0, taker_rate: Optional[float] = None,
+          premium_rate: Optional[float] = None) -> Optional[float]:
+    """Delta options taker fee: min(taker_rate * notional, premium_rate * premium) + 18% GST.
 
-    `spot` must be the UNDERLYING price — the notional leg is 0.03% of spot
+    `taker_rate`/`premium_rate` are the per-contract rates from /v2/products
+    (OptionQuote carries them); they default to the config fallbacks. The live
+    taker rate is 0.0001 (0.01%) — the old hardcoded 0.0003 (0.03%) overstated
+    the notional leg 3x on every fill (verified live 2026-07-24).
+
+    `spot` must be the UNDERLYING price — the notional leg is taker_rate of spot
     notional. Passing the strike instead (as this used to be called) is only
     approximately right for ATM contracts and wrong everywhere else (audit #14).
 
-    Returns None when spot is unknown: the old behaviour substituted the 3.5%
-    premium CAP, which is the maximum fee, overstating cost roughly tenfold on
-    an ATM option (audit #15). A silent wrong number is worse than an explicit
-    "cannot price this".
+    Returns None when spot is unknown: the old behaviour substituted the premium
+    CAP, which is the maximum fee, overstating cost (audit #15). A silent wrong
+    number is worse than an explicit "cannot price this".
     """
+    taker_rate = config.FEE_NOTIONAL_RATE if taker_rate is None else taker_rate
+    premium_rate = config.FEE_PREMIUM_CAP if premium_rate is None else premium_rate
     premium = price * contract_value * contracts
-    premium_cap = config.FEE_PREMIUM_CAP * premium
+    premium_cap = premium_rate * premium
     if spot <= 0:
         return None
-    notional_fee = config.FEE_NOTIONAL_RATE * spot * contract_value * contracts
+    notional_fee = taker_rate * spot * contract_value * contracts
     return min(notional_fee, premium_cap) * (1 + config.GST_RATE)
 
 
 def _fees_or_cap(price: float, contract_value: float, contracts: int,
-                 spot: float = 0.0) -> float:
+                 spot: float = 0.0, taker_rate: Optional[float] = None,
+                 premium_rate: Optional[float] = None) -> float:
     """`_fees`, falling back to the conservative premium cap when spot is
     unknown. Used on the booking path, where refusing to close is worse than
     over-charging: an unclosed position keeps real risk open."""
-    fee = _fees(price, contract_value, contracts, spot)
+    fee = _fees(price, contract_value, contracts, spot, taker_rate, premium_rate)
     if fee is not None:
         return fee
-    return config.FEE_PREMIUM_CAP * price * contract_value * contracts * (1 + config.GST_RATE)
+    prate = config.FEE_PREMIUM_CAP if premium_rate is None else premium_rate
+    return prate * price * contract_value * contracts * (1 + config.GST_RATE)
 
 
 def _settlement_time(expiry_ddmmyyyy: str) -> Optional[datetime]:
@@ -96,9 +105,16 @@ def _settlement_time(expiry_ddmmyyyy: str) -> Optional[datetime]:
         return None
 
 
-def _expiry_settled(expiry_ddmmyyyy: str) -> bool:
-    """True once the option has settled (12:00 UTC on the expiry date)."""
-    st = _settlement_time(expiry_ddmmyyyy)
+def _expiry_settled(expiry_ddmmyyyy: str,
+                    settlement_dt: Optional[datetime] = None) -> bool:
+    """True once the option has settled.
+
+    Prefers the authoritative settlement instant from /v2/products
+    (`settlement_dt`); falls back to 12:00 UTC derived from the expiry date when
+    it is unavailable. Reading the real field means a contract that ever settles
+    at a non-12:00 time books its intrinsic value on time rather than 12:00.
+    """
+    st = settlement_dt or _settlement_time(expiry_ddmmyyyy)
     return st is not None and datetime.now(timezone.utc) > st
 
 
@@ -140,6 +156,23 @@ def _limit_entry_price(quote: OptionQuote, signal: Optional[Signal] = None) -> O
     return price if price > 0 else None
 
 
+def _tp_exit_size(initial: int, current: int, tier: int) -> int:
+    """Contracts to book at a take-profit tier for the 40/40/20 ladder.
+
+    Sized from the INITIAL contract count, never the current one. Sizing TP2 as
+    a fraction of what TP1 left behind (the old `int(contracts * 0.66)`) turned a
+    10-lot into a 4/3/3 exit instead of the intended 4/4/2 — 40% of *original* at
+    each of the first two rungs, the remainder at TP3.
+
+    tier 1 -> 40% of original, tier 2 -> another 40%, tier 3 -> whatever is left.
+    Always at least 1 and never more than what is still open.
+    """
+    if tier >= 3:
+        return current
+    target = int(round(initial * 0.4))     # 40% of the ORIGINAL position
+    return max(1, min(target, current))
+
+
 @dataclass
 class Position:
     id: str
@@ -160,6 +193,17 @@ class Position:
     max_hold_bars: Optional[int] = None
     bar_seconds: int = 60
     entry_fee: float = 0.0
+    # Contract count at open. `contracts` shrinks as partial TPs book, so the
+    # 40/40/20 exit ladder must size its rungs off THIS, not the live count.
+    initial_contracts: int = 0
+    # Per-contract fee rates from /v2/products, carried so exit fees in
+    # _book_close use the same rates the entry did (audit fix: fees were a
+    # hardcoded global; the real taker rate is per-product and was 3x too high).
+    taker_commission_rate: float = config.FEE_NOTIONAL_RATE
+    premium_commission_rate: float = config.FEE_PREMIUM_CAP
+    # Authoritative settlement instant from /v2/products (None -> fall back to
+    # 12:00 UTC derived from the expiry date). Used by the settlement exit.
+    settlement_dt: Optional[datetime] = None
     last_price: Optional[float] = None
     exit_ambiguous: bool = False
     confidence: int = 50
@@ -247,7 +291,11 @@ class Executor:
         # tracks realized P&L + fees so the UI can plot "P&L since start". The
         # real demo-account balance is read from the exchange via /api/account —
         # this number must never be presented as the account balance.
-        self.session_equity = config.SESSION_EQUITY_BASE
+        # config.starting_balance() (audit fix D1): must match the wallet's
+        # origin in account.py and the loss-limit threshold below, or the
+        # session equity line reports against a different baseline than the
+        # real wallet does.
+        self.session_equity = config.starting_balance()
         self.realized_pnl = 0.0
         self.wins = 0
         self.losses = 0
@@ -321,13 +369,19 @@ class Executor:
                            signal: Signal, entry: float, contracts: int,
                            bar_seconds: int, leverage: int = 1, order_id=None,
                            adv_params: dict = None) -> dict:
-        fee = _fees_or_cap(entry, quote.contract_value, contracts, spot=_spot())
+        fee = _fees_or_cap(entry, quote.contract_value, contracts, spot=_spot(),
+                           taker_rate=quote.taker_commission_rate,
+                           premium_rate=quote.premium_commission_rate)
         adv = adv_params or {}
         pos = Position(
             id=uuid.uuid4().hex[:8], strategy=strategy, direction=direction,
             symbol=quote.symbol, product_id=quote.product_id, strike=quote.strike,
             expiry=quote.expiry, entry_price=entry, contracts=contracts,
+            initial_contracts=contracts,
             contract_value=quote.contract_value,
+            taker_commission_rate=quote.taker_commission_rate,
+            premium_commission_rate=quote.premium_commission_rate,
+            settlement_dt=getattr(quote, "settlement_dt", None),
             target=adv.get("option_tp3") or (entry * (1 + signal.target_pct)), 
             stop=adv.get("option_sl_price") or (entry * (1 - signal.sl_pct)),
             mode=config.EXECUTION_MODE, reason=signal.reason, opened_at=time.time(),
@@ -386,7 +440,10 @@ class Executor:
         # Check daily loss limit
         from .settings import manager
         loss_limit_pct = manager.get("daily_loss_limit_pct") / 100.0
-        start_balance = manager.get("starting_virtual_balance")
+        # config.starting_balance() (audit fix D1) — same origin the wallet and
+        # session equity line use, so this threshold is measured against the
+        # account it's actually protecting.
+        start_balance = config.starting_balance()
         if self.realized_pnl < 0 and abs(self.realized_pnl) >= (start_balance * loss_limit_pct):
             journal.record("skip", {"strategy": signal.strategy, "direction": signal.direction,
                                     "reason": "daily loss limit reached", "symbol": quote.symbol})
@@ -438,7 +495,10 @@ class Executor:
         # Check daily loss limit
         from .settings import manager
         loss_limit_pct = manager.get("daily_loss_limit_pct") / 100.0
-        start_balance = manager.get("starting_virtual_balance")
+        # config.starting_balance() (audit fix D1) — same origin the wallet and
+        # session equity line use, so this threshold is measured against the
+        # account it's actually protecting.
+        start_balance = config.starting_balance()
         if self.realized_pnl < 0 and abs(self.realized_pnl) >= (start_balance * loss_limit_pct):
             journal.record("skip", {"strategy": signal.strategy, "direction": signal.direction,
                                     "reason": "daily loss limit reached", "symbol": quote.symbol})
@@ -523,10 +583,18 @@ class Executor:
     def _book_close(self, pos: Position, exit_price: float, contracts: int, why: str) -> None:
         frac = contracts / pos.contracts if pos.contracts else 1.0
         gross = (exit_price - pos.entry_price) * pos.contract_value * contracts
-        exit_fee = _fees_or_cap(exit_price, pos.contract_value, contracts, spot=_spot())
+        exit_fee = _fees_or_cap(exit_price, pos.contract_value, contracts, spot=_spot(),
+                                taker_rate=pos.taker_commission_rate,
+                                premium_rate=pos.premium_commission_rate)
         entry_fee_part = pos.entry_fee * frac
         net = gross - entry_fee_part - exit_fee
-        self.session_equity += gross - exit_fee - entry_fee_part
+        # The entry fee was ALREADY charged to session_equity at registration
+        # (_register_position: `self.session_equity -= fee`). Subtracting
+        # entry_fee_part here too double-counted it, dragging the session equity
+        # line low by the cumulative entry fees of every trade. Only the exit
+        # fee is new at close. (realized_pnl, which is never pre-charged the
+        # entry fee, correctly uses the full `net` below.)
+        self.session_equity += gross - exit_fee
         self.realized_pnl += net
         
         from .account import sync
@@ -631,9 +699,16 @@ class Executor:
                 daily_theta = pos.meta.get("adv_params", {}).get("daily_theta")
                 
             if daily_theta and price > 0:
-                # Delta greeks.theta is per 1.0 underlying unit. Scale by contract_value for 1 contract.
-                theta_per_contract = daily_theta * pos.contract_value
-                erosion = (theta_per_contract / price) * 100.0
+                # Delta's greeks.theta is quoted in the SAME per-underlying-unit
+                # scale as the premium (verified live 2026-07-24: theta=-50.04
+                # against mark=54.98 for a 2-DTE ATM BTC call — ~91%/day, which
+                # only makes sense if both are per-unit). `price` here is the
+                # live per-unit bid, so the daily erosion fraction is simply
+                # theta/price. Multiplying theta by contract_value while dividing
+                # by the per-unit price mixed per-contract over per-unit and
+                # understated erosion by a factor of contract_value (1000x for a
+                # 0.001 BTC lot), so the >15%/day auto-close could never fire.
+                erosion = (daily_theta / price) * 100.0
                 if erosion > 15.0:
                     journal.record("warn", {"id": pos.id, "symbol": pos.symbol, "warning": f"Position auto-closed due to extreme theta decay ({erosion:.1f}%/day)"})
                     self._close(pos, price, "theta_erosion_exceeded")
@@ -693,8 +768,9 @@ class Executor:
                     # Move BTC SL to current spot (or some breakeven approximation)
                     # For simplicity, we just rely on option_sl_price (pos.stop) for the trail
                     pos.btc_sl_price = spot
-                # Exit 40% of original contracts
-                exit_contracts = max(1, int(pos.contracts * 0.4)) if pos.contracts > 1 else 1
+                # Book 40% of the ORIGINAL position (see _tp_exit_size).
+                base_n = pos.initial_contracts or pos.contracts
+                exit_contracts = _tp_exit_size(base_n, pos.contracts, 1)
                 if exit_contracts < pos.contracts:
                     self._book_close(pos, price, exit_contracts, "tp1_partial")
                 else:
@@ -713,13 +789,12 @@ class Executor:
                 if pos.btc_sl_price and pos.btc_tp1:
                     pos.btc_sl_price = pos.btc_tp1
                 
-                # Exit 40% of original contracts. If 10 contracts, 4 at TP1, 4 at TP2, 2 at TP3.
-                # To exit 40% of original:
-                # Wait, pos.contracts is currently reduced by TP1. 
-                # Total was say 10. Now pos.contracts = 6. 
-                # Exit 4.
-                # For simplicity, we just exit half of what's left for TP2.
-                exit_contracts = max(1, int(pos.contracts * 0.66)) if pos.contracts > 1 else 1
+                # Book another 40% of the ORIGINAL position, making the full
+                # ladder a true 40/40/20 (10 lots -> 4 at TP1, 4 at TP2, 2 at
+                # TP3) instead of the 40/30/30 that fractioning the post-TP1
+                # remainder produced.
+                base_n = pos.initial_contracts or pos.contracts
+                exit_contracts = _tp_exit_size(base_n, pos.contracts, 2)
                 if exit_contracts < pos.contracts:
                     self._book_close(pos, price, exit_contracts, "tp2_partial")
                 else:
@@ -735,7 +810,7 @@ class Executor:
                 return self._close(pos, price, "tp3_full")
 
         # 3. Settlement / Expiry Check
-        if _expiry_settled(pos.expiry):
+        if _expiry_settled(pos.expiry, pos.settlement_dt):
             settle_px = _settlement_value(pos.direction, pos.strike, spot or None)
             if settle_px is None:
                 settle_px = 0.0
@@ -827,6 +902,15 @@ class Executor:
         adopted by reconcile because the engine cannot manage them, so this is
         how they get closed from the app.
         """
+        # Paper/simulated mode holds no real exchange positions — the account
+        # and every fill are internal — so there is nothing to reduce. The
+        # authenticated endpoint this would call is disabled and raises
+        # NotImplementedError, which is NOT a DeltaError and would escape the
+        # handler below as an uncaught 500 on /api/strategy/flatten-shorts.
+        # Answer honestly instead of crashing.
+        if config.EXECUTION_MODE == "paper":
+            return {"ok": True, "closed": 0, "positions": [], "errors": [],
+                    "note": "simulated paper mode — no real exchange shorts to flatten"}
         try:
             rows = client.positions()
         except DeltaError as exc:

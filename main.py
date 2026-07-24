@@ -48,7 +48,13 @@ from strategy.pricebus import bus as price_bus
 # --------------------------------------------------------------------------- #
 BASE_DIR = Path(__file__).resolve().parent
 DELTA_REST = "https://api.india.delta.exchange"
-DELTA_WS = "wss://socket.india.delta.exchange"
+# Public market-data socket. Delta moved ticker/trades/candlestick to this host
+# with a COMPACT array frame format; the legacy wss://socket.india.delta.exchange
+# (verbose named-key format) serves them only until 2026-07-31. This app uses
+# only public channels, so a single connection to the public host covers
+# everything — no separate private/auth socket is needed.
+DELTA_WS = "wss://public-socket.india.delta.exchange"
+DELTA_WS_LEGACY = "wss://socket.india.delta.exchange"
 
 # Symbols shown as live ticker cards on the dashboard.
 SYMBOLS = ["BTCUSD", "ETHUSD", "SOLUSD"]
@@ -160,42 +166,113 @@ def normalize_ticker(raw: dict) -> dict:
     }
 
 
+def _arr(seq, i):
+    """Safe index + float-convert for the compact WS array fields."""
+    try:
+        return _fnum(seq[i])
+    except (IndexError, TypeError, KeyError):
+        return None
+
+
 def normalize_candle(raw: dict) -> dict:
     """Convert a WS `candlestick_{res}` payload into a chart-ready update.
 
-    Delta sends `candle_start_time` in microseconds; TradingView Lightweight
-    Charts expects the bar `time` in whole seconds.
+    New compact (public socket) format: `cst` = candle start in microseconds,
+    `o/h/l/c/v`, `res`, `sy`. Legacy verbose keys are kept as a fallback so a
+    frame from the old socket still parses. TradingView Lightweight Charts wants
+    the bar `time` in whole seconds.
     """
-    start_us = raw.get("candle_start_time")
+    start_us = raw.get("cst", raw.get("candle_start_time"))
     time_s = int(start_us / 1_000_000) if start_us is not None else None
     return {
         "type": "candle",
-        "symbol": raw.get("symbol"),
-        "resolution": raw.get("resolution"),
+        "symbol": raw.get("sy") or raw.get("symbol"),
+        "resolution": raw.get("res") or raw.get("resolution"),
         "time": time_s,
-        "open": _fnum(raw.get("open")),
-        "high": _fnum(raw.get("high")),
-        "low": _fnum(raw.get("low")),
-        "close": _fnum(raw.get("close")),
-        "volume": _fnum(raw.get("volume")),
+        "open": _fnum(raw.get("o", raw.get("open"))),
+        "high": _fnum(raw.get("h", raw.get("high"))),
+        "low": _fnum(raw.get("l", raw.get("low"))),
+        "close": _fnum(raw.get("c", raw.get("close"))),
+        "volume": _fnum(raw.get("v", raw.get("volume"))),
     }
 
 
 def normalize_trade(raw: dict, symbol: str | None = None) -> dict:
-    """Convert an `all_trades` tick (or a snapshot entry) into a clean trade.
+    """Convert a compact `trades` tick into a clean trade.
 
-    The market aggressor is the taker: buyer_role == 'taker' -> BUY (green),
-    seller_role == 'taker' -> SELL (red).
+    New compact format: `sy` symbol, `p` price, `s` size, `r` aggressor role,
+    `t` trade time (μs). The `r` field maps to the market aggressor's side —
+    verified live 2026-07-24 by matching prints against the old all_trades
+    buyer_role/seller_role: `r == "t"` = buyer was the taker -> BUY (green),
+    `r == "m"` = seller was the taker -> SELL (red). Legacy verbose keys remain
+    as a fallback.
     """
-    side = "buy" if raw.get("buyer_role") == "taker" else (
-        "sell" if raw.get("seller_role") == "taker" else "unknown"
-    )
+    r = raw.get("r")
+    if r == "t" or raw.get("buyer_role") == "taker":
+        side = "buy"
+    elif r == "m" or raw.get("seller_role") == "taker":
+        side = "sell"
+    else:
+        side = "unknown"
     return {
-        "symbol": raw.get("symbol") or symbol,
-        "price": _fnum(raw.get("price")),
-        "size": _fnum(raw.get("size")),
+        "symbol": raw.get("sy") or raw.get("symbol") or symbol,
+        "price": _fnum(raw.get("p", raw.get("price"))),
+        "size": _fnum(raw.get("s", raw.get("size"))),
         "side": side,
-        "timestamp": raw.get("timestamp"),  # microseconds
+        "timestamp": raw.get("t") or raw.get("timestamp"),  # microseconds
+    }
+
+
+def normalize_ws_ticker_item(item: dict, spot_price) -> dict:
+    """Map ONE compact `ticker.d[]` item (+ the frame's top-level spot) into the
+    SAME shape the browser and price bus consumed from the old verbose v2/ticker
+    frame, so nothing downstream needs to know the wire format changed.
+
+    Compact layout (every index cross-checked live 2026-07-24 against the REST
+    named fields for the same option, so bid/ask can't be transposed):
+        s = symbol                      m   = mark_price
+        g   = [delta, gamma, rho, theta, vega]
+        q   = [best_ask, ask_size, best_bid, bid_size, _]
+        qiv = [ask_iv, bid_iv, mark_iv]
+        ohlc= [open, high, low, close]  pb  = [band_low, band_high]
+        oi  = [oi_contracts, oi_value_usd]   m24hc = 24h % change
+    """
+    g = item.get("g") or []
+    q = item.get("q") or []
+    qiv = item.get("qiv") or []
+    ohlc = item.get("ohlc") or []
+    oi = item.get("oi") or []
+    band = item.get("pb") or []
+    return {
+        "type": "ticker",
+        "symbol": item.get("s"),
+        "spot_price": _fnum(spot_price),
+        "mark_price": _fnum(item.get("m")),
+        "best_bid": _arr(q, 2),
+        "best_ask": _arr(q, 0),
+        "bid_size": _arr(q, 3),
+        "ask_size": _arr(q, 1),
+        "high": _arr(ohlc, 1),
+        "low": _arr(ohlc, 2),
+        "open": _arr(ohlc, 0),
+        "close": _arr(ohlc, 3),
+        "volume": None,          # not carried in the compact ticker frame
+        "turnover_usd": None,
+        "oi": _arr(oi, 0),
+        "oi_value_usd": _arr(oi, 1),
+        "change_24h": _fnum(item.get("m24hc")),
+        "funding_rate": None,
+        "delta": _arr(g, 0),
+        "gamma": _arr(g, 1),
+        "rho": _arr(g, 2),
+        "theta": _arr(g, 3),
+        "vega": _arr(g, 4),
+        "mark_iv": _arr(qiv, 2),   # fraction, e.g. 0.359
+        "ask_iv": _arr(qiv, 0),
+        "bid_iv": _arr(qiv, 1),
+        "price_band_low": _arr(band, 0),
+        "price_band_high": _arr(band, 1),
+        "timestamp": item.get("ts"),
     }
 
 
@@ -275,7 +352,7 @@ async def _drain_pending_subscriptions(ws) -> None:
     batch = pending[:40]
     await ws.send(json.dumps({
         "type": "subscribe",
-        "payload": {"channels": [{"name": "v2/ticker", "symbols": batch}]},
+        "payload": {"channels": [{"name": "ticker", "symbols": batch}]},
     }))
     price_bus.mark_subscribed(batch)
 
@@ -288,58 +365,43 @@ async def _handle_upstream_message(message) -> None:
         return
     mtype = raw.get("type", "")
 
-    if mtype == "v2/ticker":
-        if not raw.get("symbol"):
-            return
-        # Publish EVERY ticker (underlyings and options) to the in-memory bus —
-        # this is what makes engine reads instant and what the option chain
-        # streams from. It happens before any broadcast so a slow browser can
-        # never delay the trading engine's view of price.
-        q = raw.get("quotes") or {}
-        g = raw.get("greeks") or {}
-        price_bus.update(
-            raw.get("symbol"),
-            best_bid=_fnum(q.get("best_bid")),
-            best_ask=_fnum(q.get("best_ask")),
-            bid_size=_fnum(q.get("bid_size")),
-            ask_size=_fnum(q.get("ask_size")),
-            mark_price=_fnum(raw.get("mark_price")),
-            spot_price=_fnum(raw.get("spot_price")),
-            close=_fnum(raw.get("close")),
-            iv=_iv_pct(q.get("mark_iv")),
-            delta=_fnum(g.get("delta")),
-            gamma=_fnum(g.get("gamma")),
-            theta=_fnum(g.get("theta")),
-            vega=_fnum(g.get("vega")),
-            oi=_fnum(raw.get("oi_contracts")),
-            volume=_fnum(raw.get("volume")),
-        )
-
-    if mtype == "v2/ticker" and raw.get("symbol") in SYMBOLS:
-        norm = normalize_ticker(raw)
-        hub.last_ticker[norm["symbol"]] = norm
-        await hub.broadcast(norm)
+    if mtype == "ticker":
+        # Compact frame: one top-level `sp` spot shared by a `d[]` array of
+        # contract items. Publish EVERY item (underlyings + options) to the
+        # in-memory bus FIRST, so a slow browser can never delay the engine's
+        # price view. bid/ask/spot are the safety-critical fields (index-verified
+        # in normalize_ws_ticker_item); greeks/iv here are display-only — the
+        # trading path reads greeks from REST.
+        spot = raw.get("sp")
+        for item in raw.get("d") or []:
+            sym = item.get("s")
+            if not sym:
+                continue
+            norm = normalize_ws_ticker_item(item, spot)
+            price_bus.update(
+                sym,
+                best_bid=norm["best_bid"], best_ask=norm["best_ask"],
+                bid_size=norm["bid_size"], ask_size=norm["ask_size"],
+                mark_price=norm["mark_price"], spot_price=norm["spot_price"],
+                close=norm["close"],
+                iv=(norm["mark_iv"] * 100 if norm["mark_iv"] is not None else None),
+                delta=norm["delta"], gamma=norm["gamma"],
+                theta=norm["theta"], vega=norm["vega"],
+                oi=norm["oi"],
+            )
+            if sym in SYMBOLS:
+                hub.last_ticker[sym] = norm
+                await hub.broadcast(norm)
 
     elif mtype.startswith("candlestick_"):
         norm = normalize_candle(raw)
         if norm["time"] is not None:
             await hub.broadcast(norm)
 
-    elif mtype == "all_trades":
+    elif mtype == "trades":
         trade = normalize_trade(raw)
         hub.recent_trades.appendleft(trade)
         await hub.broadcast({"type": "trade", **trade})
-
-    elif mtype == "all_trades_snapshot":
-        sym = raw.get("symbol")
-        trades = [normalize_trade(t, sym) for t in (raw.get("trades") or [])]
-        # Snapshot arrives newest-first; seed the cache in that order.
-        hub.recent_trades.clear()
-        for t in trades[:MAX_RECENT_TRADES]:
-            hub.recent_trades.append(t)
-        await hub.broadcast(
-            {"type": "trade_snapshot", "trades": trades[:MAX_RECENT_TRADES]}
-        )
 
 
 async def delta_ws_consumer() -> None:
@@ -353,11 +415,11 @@ async def delta_ws_consumer() -> None:
     On reconnect the dynamic option subscriptions are re-registered, because a
     fresh socket carries none of them.
     """
-    channels = [{"name": "v2/ticker", "symbols": SYMBOLS}]
+    channels = [{"name": "ticker", "symbols": SYMBOLS}]
     # Phase 2: live candles (all UI timeframes) + trade tape for the chart symbol.
     for res in CHART_RESOLUTIONS:
         channels.append({"name": f"candlestick_{res}", "symbols": [CHART_SYMBOL]})
-    channels.append({"name": "all_trades", "symbols": [CHART_SYMBOL]})
+    channels.append({"name": "trades", "symbols": [CHART_SYMBOL]})
 
     subscribe_msg = json.dumps(
         {"type": "subscribe", "payload": {"channels": channels}}
@@ -1409,8 +1471,12 @@ async def api_preview_confidence(symbol: str, side: str, confidence: int = 50):
         return JSONResponse(status_code=400, content={"error": "No tradable option found for current spot price."})
         
     snap = account_sync.snapshot()
-    virtual_balance = snap.get("equity_usd", 10000.0)
-    
+    # Fallback matches config.starting_balance() (audit fix D1) — equity_usd is
+    # always populated by account.py in practice, so this only fires if the
+    # snapshot is somehow malformed, but a stale hardcoded 10000 fallback here
+    # would silently diverge from the real wallet origin like the others did.
+    virtual_balance = snap.get("equity_usd", strat_config.starting_balance())
+
     try:
         adv_params = calculate_options_order_params(quote.symbol, side.upper(), confidence, virtual_balance)
     except Exception as e:

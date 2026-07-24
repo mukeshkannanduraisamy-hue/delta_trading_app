@@ -25,6 +25,15 @@ class OptionQuote:
     contract_value: float  # underlying units per contract (e.g. 0.001 BTC)
     tick_size: float       # min price increment for limit orders (e.g. 0.5)
     expiry: str            # DD-MM-YYYY
+    # Per-contract fee rates from /v2/products (fall back to config defaults).
+    # taker_commission_rate is a top-level product field; the premium cap rate
+    # lives under product_specs.premium_commission_rate.
+    taker_commission_rate: float = config.FEE_NOTIONAL_RATE
+    premium_commission_rate: float = config.FEE_PREMIUM_CAP
+    # Authoritative settlement instant from the product's settlement_time
+    # (ISO 8601). Currently 12:00 UTC for every Delta contract, but read from
+    # the field rather than hardcoded so a non-12:00 contract settles on time.
+    settlement_dt: Optional[datetime] = None
 
 
 def _f(v) -> Optional[float]:
@@ -32,6 +41,36 @@ def _f(v) -> Optional[float]:
         return float(v) if v is not None else None
     except (TypeError, ValueError):
         return None
+
+
+def _fee_rates(prod: dict) -> tuple[float, float]:
+    """(taker_commission_rate, premium_commission_rate) for a product.
+
+    taker_commission_rate is a top-level product field; the premium-cap rate
+    lives under product_specs.premium_commission_rate (verified live
+    2026-07-24). Falls back to the config defaults if either is missing so a
+    sparse product can never zero out the simulated fee.
+    """
+    taker = _f(prod.get("taker_commission_rate"))
+    specs = prod.get("product_specs") or {}
+    premium = _f(specs.get("premium_commission_rate"))
+    return (taker if taker and taker > 0 else config.FEE_NOTIONAL_RATE,
+            premium if premium and premium > 0 else config.FEE_PREMIUM_CAP)
+
+
+def _parse_settlement(prod: dict) -> Optional[datetime]:
+    """Authoritative settlement instant from a product's `settlement_time`
+    (ISO 8601, e.g. '2026-07-24T12:00:00Z'). Returns a UTC-aware datetime, or
+    None if the field is absent/unparseable — callers then fall back to the
+    12:00-UTC-from-symbol derivation."""
+    st = prod.get("settlement_time")
+    if not st:
+        return None
+    try:
+        dt = datetime.fromisoformat(str(st).replace("Z", "+00:00"))
+    except (ValueError, TypeError):
+        return None
+    return dt.astimezone(timezone.utc)
 
 
 class OptionResolver:
@@ -151,6 +190,7 @@ class OptionResolver:
             strike_val = _f(prod.get("strike_price"))
             if strike_val is None or strike_val <= 0:
                 continue  # refuse quote with missing strike — avoids settlement value corruption
+            tk, pm = _fee_rates(prod)
             out[side] = OptionQuote(
                 symbol=sym,
                 product_id=int(prod.get("id") or t.get("product_id") or 0),
@@ -162,6 +202,9 @@ class OptionResolver:
                 contract_value=cv,
                 tick_size=(_f(prod.get("tick_size")) if _f(prod.get("tick_size")) is not None else 0.5),
                 expiry=expiry,
+                taker_commission_rate=tk,
+                premium_commission_rate=pm,
+                settlement_dt=_parse_settlement(prod),
             )
         return out
 
@@ -212,12 +255,16 @@ class OptionResolver:
         if strike_val is None or strike_val <= 0:
             return None
 
+        tk, pm = _fee_rates(prod)
         return OptionQuote(
             symbol=sym, product_id=int(product_id),
             strike=strike_val, side=side,
             best_bid=bid, best_ask=ask, mark_price=mark,
             contract_value=cv, tick_size=(_f(prod.get("tick_size")) if _f(prod.get("tick_size")) is not None else 0.5),
             expiry=expiry,
+            taker_commission_rate=tk,
+            premium_commission_rate=pm,
+            settlement_dt=_parse_settlement(prod),
         )
 
     def premium_candles(self, option_symbol: str, resolution: str, count: int) -> list[dict]:

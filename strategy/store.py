@@ -242,7 +242,11 @@ def performance() -> dict:
             "SELECT strategy, net_pnl, gross_pnl, ts_close, mode FROM trades ORDER BY ts_close ASC"
         ).fetchall()]
 
-    start_balance = config.PAPER_START_BALANCE
+    # config.starting_balance() (audit fix D1): the equity-curve origin must
+    # match the live wallet's starting balance (account.py) or the performance
+    # page's "equity" plots against a different baseline than the account it's
+    # summarizing.
+    start_balance = config.starting_balance()
     equity = start_balance
     peak = start_balance
     max_dd = 0.0

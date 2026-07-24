@@ -587,7 +587,11 @@ window.resetDecisionCounters = resetDecisionCounters;
         if (reason.includes('iv') || reason.includes('implied volatility') || reason.includes('ivr')) {
           decisionCounters.skipHighIV++;
         }
-        else if (reason.includes('dte') || reason.includes('expiry') || reason.includes('days to expiry')) {
+        // The near-expiry auto-skip message is "TRADE BLOCKED: Option expires
+        // in N hours …" (options_calc.calculate_options_order_params) — it
+        // carries neither the literal "dte" nor "expiry", so match on the words
+        // it actually uses or these land in the low-confidence bucket instead.
+        else if (reason.includes('dte') || reason.includes('expire') || reason.includes('blocked') || reason.includes('days to expiry')) {
           decisionCounters.skipLowDTE++;
         }
         else if (reason.includes('confidence') || reason.includes('conf')) {

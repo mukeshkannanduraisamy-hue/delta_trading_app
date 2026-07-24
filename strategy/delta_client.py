@@ -75,16 +75,27 @@ class DeltaAuthError(DeltaError):
 def _retry_after(resp) -> float:
     """Seconds until the rate-limit window resets.
 
-    Delta sends X-RATE-LIMIT-RESET in MILLISECONDS; the standard Retry-After is
-    in seconds. Values above 1000 are therefore milliseconds.
+    Delta's `X-RATE-LIMIT-RESET` is ALWAYS milliseconds (per Delta guidance):
+    a value of 500 means 500ms, not 500s. The old heuristic
+    (`v/1000 if v>1000 else v`) misread any sub-second reset as whole seconds
+    and backed off up to 1000x too long — a 500ms reset became an 8-minute
+    stall. The standard HTTP `Retry-After` header, if Delta sends it instead,
+    is in SECONDS, so each header is parsed in its own unit rather than lumping
+    them together.
     """
-    raw = resp.headers.get("X-RATE-LIMIT-RESET") or resp.headers.get("Retry-After")
-    try:
-        v = float(raw)
-    except (TypeError, ValueError):
-        return 5.0
-    secs = v / 1000.0 if v > 1000 else v
-    return min(max(secs, 1.0), 300.0)
+    ms = resp.headers.get("X-RATE-LIMIT-RESET")
+    if ms is not None:
+        try:
+            return min(max(float(ms) / 1000.0, 0.5), 300.0)   # ms -> s
+        except (TypeError, ValueError):
+            pass
+    secs = resp.headers.get("Retry-After")
+    if secs is not None:
+        try:
+            return min(max(float(secs), 1.0), 300.0)          # already seconds
+        except (TypeError, ValueError):
+            pass
+    return 5.0
 
 
 def _backoff(attempt: int) -> float:
@@ -130,7 +141,7 @@ class DeltaClient:
         if not isinstance(data, dict):
             return data
         if data.get("success") is False:
-            raise DeltaError(f"{url}: {data.get('error', data)}")
+            raise DeltaError(f"{base}{path}: {data.get('error', data)}")
         return data.get("result", data)
 
     def _signed(
