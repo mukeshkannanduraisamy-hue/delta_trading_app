@@ -631,11 +631,13 @@ class Executor:
                 daily_theta = pos.meta.get("adv_params", {}).get("daily_theta")
                 
             if daily_theta and price > 0:
-                erosion = (daily_theta / price) * 100
-                if erosion > 15:
-                    journal.record("warn", {"id": pos.id, "symbol": pos.symbol, "warning": "Position auto-closed due to extreme theta decay"})
+                # Delta greeks.theta is per 1.0 underlying unit. Scale by contract_value for 1 contract.
+                theta_per_contract = daily_theta * pos.contract_value
+                erosion = (theta_per_contract / price) * 100.0
+                if erosion > 15.0:
+                    journal.record("warn", {"id": pos.id, "symbol": pos.symbol, "warning": f"Position auto-closed due to extreme theta decay ({erosion:.1f}%/day)"})
                     self._close(pos, price, "theta_erosion_exceeded")
-                elif erosion > 8:
+                elif erosion > 8.0:
                     journal.record("warn", {"id": pos.id, "symbol": pos.symbol, "warning": f"URGENT: Theta is eroding {erosion:.1f}% of remaining premium per day. Recommend closing position."})
 
     def _check_sl_tp(self):
@@ -662,7 +664,7 @@ class Executor:
             # 1. Dual-Condition Stop Loss
             sl_hit = False
             sl_reason = ""
-            if pos.stop and price <= pos.stop:
+            if pos.stop and price is not None and price > 0 and price <= pos.stop:
                 sl_hit = True
                 sl_reason = "stop_premium"
             elif pos.btc_sl_price and spot:
@@ -678,7 +680,7 @@ class Executor:
 
             # 2. Multi-Layer Take Profit (40/40/20)
             # TP1
-            tp1_hit = (pos.option_tp1 and price >= pos.option_tp1)
+            tp1_hit = (pos.option_tp1 and price is not None and price >= pos.option_tp1)
             if pos.btc_tp1 and spot:
                 if pos.direction == "CE" and spot >= pos.btc_tp1: tp1_hit = True
                 if pos.direction == "PE" and spot <= pos.btc_tp1: tp1_hit = True
