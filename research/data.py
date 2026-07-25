@@ -106,6 +106,55 @@ def fetch(symbol: str, resolution: str, days: float, refresh: bool = False) -> d
     return data
 
 
+def resample(d: dict, from_res: str, to_res: str) -> dict:
+    """Aggregate a finer series into a coarser one.
+
+    Higher timeframes are derived from ONE 1m fetch rather than fetched
+    separately: independent fetches can disagree at bar boundaries, which
+    silently introduces look-ahead when a strategy reads two timeframes.
+
+    Buckets align to the epoch grid (floor(t / target) * target) so an "1h"
+    bar always starts on the hour, matching what the exchange serves. An
+    incomplete trailing bucket is dropped -- a partial bar has not closed, and
+    the live engine only ever evaluates closed bars.
+    """
+    src = res_seconds(from_res)
+    dst = res_seconds(to_res)
+    if dst < src:
+        raise ValueError(f"cannot resample {from_res} -> {to_res}: target is finer")
+    if dst % src:
+        raise ValueError(f"cannot resample {from_res} -> {to_res}: not an integer multiple")
+    if dst == src:
+        return {k: v.copy() for k, v in d.items()}
+
+    t = d["time"]
+    if len(t) == 0:
+        return {k: v.copy() for k, v in d.items()}
+
+    bucket = (t // dst) * dst
+    # first row index of each bucket, in order
+    starts = np.flatnonzero(np.r_[True, bucket[1:] != bucket[:-1]])
+    ends = np.r_[starts[1:], len(t)]                  # exclusive
+
+    # Drop any bucket missing bars. A bucket built from a partial set of
+    # source bars is not the bar the exchange would have printed, and letting
+    # one through would put a silently wrong high/low into the study.
+    complete = (ends - starts) == (dst // src)
+    starts, ends = starts[complete], ends[complete]
+
+    return {
+        "time": bucket[starts],
+        "open": d["open"][starts],
+        "close": d["close"][ends - 1],
+        "high": np.array([d["high"][a:b].max() for a, b in zip(starts, ends)],
+                         dtype="float64"),
+        "low": np.array([d["low"][a:b].min() for a, b in zip(starts, ends)],
+                        dtype="float64"),
+        "volume": np.array([d["volume"][a:b].sum() for a, b in zip(starts, ends)],
+                           dtype="float64"),
+    }
+
+
 def validate(d: dict, resolution: str, label: str = "") -> dict:
     """Integrity report: NaNs, duplicates, gaps, OHLC sanity."""
     secs = res_seconds(resolution)

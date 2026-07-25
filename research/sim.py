@@ -39,7 +39,9 @@ def simulate(d: dict, signals: np.ndarray, *,
              stop_atr: float = 1.0, rr: float = 1.5,
              atr_period: int = 14, max_hold: int = 30,
              long_only: bool = False,
-             atr_override: np.ndarray | None = None) -> dict:
+             atr_override: np.ndarray | None = None,
+             cost_model=None, spot: np.ndarray | None = None,
+             contract_value: float = 1.0, contracts: int = 1) -> dict:
     """Run every signal through the fill model. Returns trades + equity curve.
 
     One position at a time: after a trade closes the scanner resumes at the exit
@@ -107,7 +109,16 @@ def simulate(d: dict, signals: np.ndarray, *,
             exit_i = k
 
         gross = (exit_px - entry) if long else (entry - exit_px)
-        cost = _round_trip_cost(entry, exit_px)
+        if cost_model is None:
+            cost = _round_trip_cost(entry, exit_px)
+        else:
+            # Options price off premium but are FEE'd off spot notional, so the
+            # cost model needs the underlying at both ends of the trade.
+            ctx = {"contract_value": contract_value, "contracts": contracts}
+            if spot is not None:
+                ctx["spot_in"] = float(spot[min(i + 1, len(spot) - 1)])
+                ctx["spot_out"] = float(spot[min(exit_i, len(spot) - 1)])
+            cost = cost_model.round_trip_cost(entry, exit_px, **ctx)
         net = gross - cost
         trades.append({
             "i": int(i), "entry_i": int(i + 1), "exit_i": int(exit_i),
