@@ -201,14 +201,39 @@ window.resetDecisionCounters = resetDecisionCounters;
     $("btn-stop").disabled = !running;
   }
 
-  async function post(url, body) {
+  async function post(url, body, isRetry = false) {
+    const headers = { "Content-Type": "application/json" };
+    try {
+      const savedKey = localStorage.getItem("app_api_key");
+      if (savedKey) headers["x-api-key"] = savedKey;
+    } catch (e) {}
+
     const r = await fetch(url, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers,
       body: body ? JSON.stringify(body) : undefined,
     });
+    if (r.status === 401 && !isRetry) {
+      const key = window.prompt("Security Protection Active:\nPlease enter your APP_API_KEY (from Render Environment Variables) to authorize remote control:");
+      if (!key) throw new Error("Authentication cancelled. APP_API_KEY is required to change server state.");
+      
+      const authRes = await fetch("/api/auth", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ key: key.trim() }),
+      });
+      if (!authRes.ok) {
+        try { localStorage.removeItem("app_api_key"); } catch (e) {}
+        throw new Error("Invalid APP_API_KEY. Please verify your password in Render environment settings.");
+      }
+      try { localStorage.setItem("app_api_key", key.trim()); } catch (e) {}
+      return post(url, body, true);
+    }
     if (!r.ok) {
       const text = await r.text();
+      if (r.status === 503 && text.includes("APP_API_KEY")) {
+        throw new Error("Remote access is locked because APP_API_KEY is not set on Render. Add APP_API_KEY under Environment settings in your Render dashboard.");
+      }
       throw new Error(`HTTP ${r.status}: ${text.slice(0, 200)}`);
     }
     return r.json();
