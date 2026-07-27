@@ -166,6 +166,18 @@ def _holds(train_e, test_e, n_test, beats_constant) -> bool:
             and bool(beats_constant))
 
 
+def _guard(tf: str, dte_hours: float) -> bool:
+    """Print a duty-cycle warning; return False when the combination is unusable."""
+    warn = search.duty_warning(tf, dte_hours)
+    if warn is None:
+        return True
+    bar = "!" * 74
+    print(f"\n  {bar}")
+    print(f"  {warn}")
+    print(f"  {bar}")
+    return "UNUSABLE" not in warn
+
+
 def _prepare(strategy: str, tf: str, dte_hours: float, days: int, overlay=None):
     """Fetch, resample and price the option legs ONCE for reuse across combos."""
     d1 = data.fetch("BTCUSD", "1m", days)
@@ -490,6 +502,10 @@ def main() -> None:
         return
 
     dte = DTE_CHOICES[args.dte]
+    if not _guard(args.tf, dte):
+        print("\n  Refusing to report numbers from a combination that cannot")
+        print("  produce trades. Use a shorter timeframe or a longer DTE.")
+        return
     if args.validate_all:
         validate_all(args.tf, dte, args.days, args.split)
     elif args.validate:

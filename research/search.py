@@ -189,6 +189,60 @@ def _slice(d, a, b):
     return out
 
 
+ATR_WARMUP = 14              # sim.simulate's default atr_period
+DUTY_MIN = 0.50              # below this, results are a warmup artifact
+
+
+def duty_cycle(tf: str, dte_hours: float, atr_period: int = ATR_WARMUP) -> dict:
+    """What fraction of each contract's life can actually open a trade?
+
+    A fresh contract is struck every dte/2 hours and no trade may cross a roll
+    (see _trades), so each segment is a self-contained series. ATR needs
+    `atr_period` bars of warmup INSIDE that segment before any entry is valid.
+    When the segment is short relative to the warmup, almost none of the
+    contract's life is tradeable and the surviving trades are a biased sample
+    from the segment's tail.
+
+    Measured 2026-07-27, this silently produced a false result: at 15m with 8h
+    DTE only 2 of every 16 bars can open a trade (12% duty). Average hold fell
+    to 0.3 bars, so theta looked tiny (-0.017 R) and the direction/theta ratio
+    appeared to invert to 1.75 in favour of short maturities. On 5m, where duty
+    is 71%, the same measurement gives 1.00 — the inversion was an artifact.
+    At 1h and 4h with 8h DTE the segment is shorter than the warmup entirely
+    and NO trade is possible.
+    """
+    from research import data as _data
+
+    bar_s = _data.res_seconds(tf)
+    seg = int(dte_hours * 3600 / 2) // bar_s
+    tradeable = max(0, seg - atr_period)
+    duty = (tradeable / seg) if seg > 0 else 0.0
+    return {"timeframe": tf, "dte_hours": dte_hours,
+            "bars_per_segment": seg, "warmup": atr_period,
+            "tradeable_bars": tradeable, "duty": duty,
+            "usable": duty >= DUTY_MIN,
+            "reason": None if duty >= DUTY_MIN else (
+                f"only {tradeable} of {seg} bars per contract can open a trade "
+                f"({duty:.0%} duty) — results are a warmup artifact, not a "
+                f"measurement" if seg > 0 else "segment shorter than one bar")}
+
+
+def duty_warning(tf: str, dte_hours: float) -> str | None:
+    """One-line warning for display, or None when the combination is sound."""
+    d = duty_cycle(tf, dte_hours)
+    if d["usable"]:
+        return None
+    if d["tradeable_bars"] == 0:
+        return (f"UNUSABLE: {tf} with {dte_hours:.0f}h DTE gives "
+                f"{d['bars_per_segment']} bars per contract, less than the "
+                f"{d['warmup']}-bar ATR warmup. No trade can open.")
+    return (f"UNRELIABLE: {tf} with {dte_hours:.0f}h DTE — only "
+            f"{d['tradeable_bars']}/{d['bars_per_segment']} bars per contract "
+            f"are tradeable ({d['duty']:.0%} duty). Trades are a biased sample "
+            f"from each contract's tail and holds are truncated; theta will "
+            f"look artificially small.")
+
+
 def _segment_bounds(series, n):
     """Contiguous [start, end) ranges, one per contract."""
     starts = series.get("roll_starts")

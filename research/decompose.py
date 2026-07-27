@@ -40,7 +40,22 @@ from research.backtest_cli import DTE_CHOICES, _prepare, build_overlay
 
 
 def decompose(strategy: str, tf: str, dte_hours: float, days: int = 365,
-              params: dict | None = None, overlay=None) -> dict:
+              params: dict | None = None, overlay=None,
+              strict: bool = True) -> dict:
+    """Decompose one strategy's P&L. Refuses combinations that cannot measure.
+
+    `strict` blocks TF/DTE pairs whose duty cycle is too low to mean anything
+    (see search.duty_cycle). Pass strict=False only to inspect the artifact
+    deliberately -- the returned dict then carries a `duty_warning`.
+    """
+    duty = search.duty_cycle(tf, dte_hours)
+    if not duty["usable"]:
+        warn = search.duty_warning(tf, dte_hours)
+        if strict:
+            return {"trades": 0, "strategy": strategy, "timeframe": tf,
+                    "dte_hours": dte_hours, "skipped": True,
+                    "duty": duty["duty"], "duty_warning": warn}
+
     ov = overlay if overlay is not None else build_overlay()
     d_tf, ce, pe = _prepare(strategy, tf, dte_hours, days, overlay=ov)
     bar_s = data.res_seconds(tf)
@@ -97,7 +112,8 @@ def decompose(strategy: str, tf: str, dte_hours: float, days: int = 365,
         return {"trades": 0}
     return {
         "strategy": strategy, "timeframe": tf, "dte_hours": dte_hours,
-        "trades": n,
+        "trades": n, "duty": duty["duty"],
+        "duty_warning": None if duty["usable"] else search.duty_warning(tf, dte_hours),
         "theta_r": float(np.mean(theta_r)),
         "direction_r": float(np.mean(dir_r)),
         "cost_r": float(np.mean(cost_r)),
@@ -108,6 +124,19 @@ def decompose(strategy: str, tf: str, dte_hours: float, days: int = 365,
 
 
 def report(rows: list[dict]) -> None:
+    skipped = [r for r in rows if r.get("skipped")]
+    if skipped:
+        print(f"\n  {'!' * 76}")
+        print(f"  {len(skipped)} combination(s) SKIPPED — duty cycle too low to measure:")
+        seen = set()
+        for r in skipped:
+            key = (r["timeframe"], r["dte_hours"])
+            if key in seen:
+                continue
+            seen.add(key)
+            print(f"    {r['duty_warning']}")
+        print(f"  {'!' * 76}")
+
     print(f"\n{'=' * 86}")
     print("  TRADE P&L DECOMPOSITION — where does the R actually go?")
     print(f"{'=' * 86}")
