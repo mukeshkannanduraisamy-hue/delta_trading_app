@@ -31,6 +31,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
 # Phase 4 — Zing strategy engine (paper / testnet-demo options trading).
+from strategy import auth as strat_auth
 from strategy import backtest as strat_backtest
 from strategy import config as strat_config
 from strategy import research as strat_research
@@ -894,6 +895,12 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="Delta Trading App", lifespan=lifespan)
+
+# Protects every state-changing /api route. Installed as middleware rather than
+# per-route dependencies so a new POST endpoint is covered by default instead
+# of relying on someone remembering to guard it. Localhost is unaffected.
+strat_auth.install(app)
+
 app.mount("/static", StaticFiles(directory=str(BASE_DIR / "static")), name="static")
 
 
