@@ -24,6 +24,8 @@ from __future__ import annotations
 import argparse
 import gzip
 import json
+import os
+import subprocess
 import time
 from pathlib import Path
 
@@ -58,6 +60,44 @@ def snapshot_once(asset: str = "BTC") -> int:
     return len(quotes)
 
 
+LOCK = OUT_DIR / "recorder.lock"
+
+
+def _claim_lock() -> bool:
+    """Refuse to start a second looping recorder.
+
+    Autostart plus a manually-launched instance would both append to the same
+    daily file, producing duplicate quotes at near-identical timestamps. That
+    is silently corrupting rather than loudly failing, so it is blocked here.
+
+    A stale lock (process gone) is reclaimed: the recorder must survive an
+    ungraceful kill without needing manual cleanup.
+    """
+    if LOCK.exists():
+        try:
+            pid = int(LOCK.read_text().strip())
+        except (ValueError, OSError):
+            pid = -1
+        if pid > 0 and _pid_alive(pid):
+            print(f"another recorder is already running (pid {pid}); exiting")
+            return False
+        print(f"reclaiming stale lock from pid {pid}")
+    LOCK.write_text(str(os.getpid()))
+    return True
+
+
+def _pid_alive(pid: int) -> bool:
+    if os.name == "nt":
+        out = subprocess.run(["tasklist", "/FI", f"PID eq {pid}", "/NH"],
+                             capture_output=True, text=True).stdout
+        return str(pid) in out
+    try:
+        os.kill(pid, 0)
+        return True
+    except (OSError, ProcessLookupError):
+        return False
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description="record the live option book")
     ap.add_argument("--asset", default="BTC")
@@ -68,10 +108,20 @@ def main() -> None:
     if not args.loop:
         snapshot_once(args.asset)
         return
+
+    if not _claim_lock():
+        return
     print(f"recording {args.asset} book every {args.loop}s -> {OUT_DIR}")
-    while True:
-        snapshot_once(args.asset)
-        time.sleep(args.loop)
+    try:
+        while True:
+            snapshot_once(args.asset)
+            time.sleep(args.loop)
+    finally:
+        try:
+            if LOCK.exists() and LOCK.read_text().strip() == str(os.getpid()):
+                LOCK.unlink()
+        except OSError:
+            pass
 
 
 if __name__ == "__main__":
